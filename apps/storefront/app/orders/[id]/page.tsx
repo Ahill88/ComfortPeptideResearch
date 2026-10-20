@@ -1,0 +1,1 @@
+import { InfoPage } from '../../../components/info-page'; export default function OrderTracking() { return <InfoPage eyebrow="ORDER TRACKING" title="Order status."><p>Sign in to view the current fulfillment and carrier status for this order.</p></InfoPage>; }

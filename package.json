@@ -1,0 +1,12 @@
+{
+  "name": "helix-field-platform",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace=@helix-field/storefront",
+    "dev:api": "npm run start:dev --workspace=@helix-field/api",
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces"
+  },
+  "engines": { "node": ">=20" }
+}

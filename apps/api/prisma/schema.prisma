@@ -1,0 +1,101 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  PROCESSING
+  SHIPPED
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+  EXPIRED
+  REFUNDED
+}
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+model Customer {
+  id String @id @default(cuid())
+  email String @unique
+  name String?
+  createdAt DateTime @default(now())
+  orders Order[]
+}
+model Product {
+  id String @id @default(cuid())
+  sku String @unique
+  slug String @unique
+  name String
+  active Boolean @default(true)
+  priceCents Int
+  inventory Int @default(0)
+  lots Lot[]
+}
+model Lot {
+  id String @id @default(cuid())
+  code String @unique
+  productId String
+  product Product @relation(fields:[productId], references:[id])
+  coaKey String
+  purity Decimal @db.Decimal(5,2)
+  releasedAt DateTime @default(now())
+}
+model Order {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  status OrderStatus @default(PENDING_PAYMENT)
+  totalCents Int
+  currency String @default("USD")
+  researchAcknowledgedAt DateTime?
+  createdAt DateTime @default(now())
+  items OrderItem[]
+  payment Payment?
+}
+model OrderItem {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId], references:[id])
+  productId String
+  lotCode String
+  quantity Int
+  unitCents Int
+}
+model Payment {
+  id String @id @default(cuid())
+  orderId String @unique
+  order Order @relation(fields:[orderId], references:[id])
+  provider String
+  status PaymentStatus @default(PENDING)
+  amountAtomic String
+  currency String
+  walletAddress String?
+  txSignature String? @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  ledgerEntries LedgerEntry[]
+}
+model LedgerEntry {
+  id String @id @default(cuid())
+  paymentId String
+  payment Payment @relation(fields:[paymentId], references:[id])
+  account String
+  direction LedgerDirection
+  amountAtomic String
+  currency String
+  createdAt DateTime @default(now())
+}

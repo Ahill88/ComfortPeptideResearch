@@ -1,0 +1,2 @@
+import Link from 'next/link'; import { InfoPage } from '../../components/info-page';
+export default function Cart() { return <InfoPage eyebrow="RESEARCH BAG" title="Your selection."><div className="border-y border-line py-8 text-center"><p>Your research bag is empty.</p><Link className="mt-5 inline-block bg-ink px-5 py-3 text-xs text-white" href="/catalog">Explore materials</Link></div></InfoPage>; }

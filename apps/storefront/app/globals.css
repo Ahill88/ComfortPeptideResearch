@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: #f7f8f6; color: #102d31; font-family: Arial, sans-serif; }
+a { color: inherit; text-decoration: none; }
+.grid-lines { background-image: linear-gradient(#ffffff18 1px, transparent 1px), linear-gradient(90deg, #ffffff18 1px, transparent 1px); background-size: 42px 42px; }
+.vial { box-shadow: inset 9px 0 13px #fff8, inset -9px 0 18px #527a7a44, 16px 24px 30px #071d2044; }
