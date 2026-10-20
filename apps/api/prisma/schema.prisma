@@ -4,7 +4,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url = env("DATABASE_URL")
 }
 
 enum OrderStatus {
@@ -27,20 +27,24 @@ enum LedgerDirection {
   DEBIT
   CREDIT
 }
-
 model Customer {
   id String @id @default(cuid())
   email String @unique
   name String?
   createdAt DateTime @default(now())
   orders Order[]
+  wallet CustomerWallet?
+  onRampIntents OnRampIntent[]
+  cryptoTransactions CryptoTransaction[]
+  creditReservations CreditReservation[]
+  eligibility CustomerEligibility?
 }
 model Product {
   id String @id @default(cuid())
   sku String @unique
   slug String @unique
   name String
-  active Boolean @default(true)
+  active Boolean @default(false)
   priceCents Int
   inventory Int @default(0)
   lots Lot[]
@@ -63,8 +67,14 @@ model Order {
   currency String @default("USD")
   researchAcknowledgedAt DateTime?
   createdAt DateTime @default(now())
+  // Client-supplied Idempotency-Key, scoped to the owning customer. NULL for orders created internally.
+  idempotencyKey String?
+  // SHA-256 of the canonical request payload; a replay with the same key must match it.
+  requestHash String?
   items OrderItem[]
   payment Payment?
+  creditReservation CreditReservation?
+  @@unique([customerId, idempotencyKey])
 }
 model OrderItem {
   id String @id @default(cuid())
@@ -98,4 +108,149 @@ model LedgerEntry {
   amountAtomic String
   currency String
   createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// User-owned wallet and Research Credits domain.
+// Token amounts are BigInt USDC base units (6 decimals). Research Credits are a
+// derived display unit and are intentionally NOT stored as an issued balance.
+// No column here may hold private keys, seed phrases, or signing material.
+// ---------------------------------------------------------------------------
+enum OnRampStatus {
+  CREATED
+  PENDING
+  COMPLETED
+  FAILED
+  EXPIRED
+}
+enum CryptoTxType {
+  DEPOSIT
+  WITHDRAWAL
+  PURCHASE
+  REFUND
+}
+enum CryptoTxStatus {
+  PREPARED
+  SUBMITTED
+  CONFIRMED
+  FINALIZED
+  FAILED
+  EXPIRED
+}
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
+model CustomerWallet {
+  id String @id @default(cuid())
+  customerId String @unique
+  customer Customer @relation(fields:[customerId], references:[id])
+  address String @unique
+  provider String
+  network String
+  createdAt DateTime @default(now())
+  snapshots BalanceSnapshot[]
+  permissions DelegatedPermission[]
+}
+model BalanceSnapshot {
+  id String @id @default(cuid())
+  walletId String
+  wallet CustomerWallet @relation(fields:[walletId], references:[id])
+  mint String
+  amountAtomic BigInt
+  slot BigInt?
+  observedAt DateTime @default(now())
+  @@index([walletId, observedAt])
+}
+model OnRampIntent {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  provider String
+  status OnRampStatus @default(CREATED)
+  intendedUsdCents Int
+  destinationAddress String
+  externalReference String? @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([customerId, createdAt])
+}
+model CryptoTransaction {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  type CryptoTxType
+  status CryptoTxStatus @default(PREPARED)
+  amountAtomic BigInt
+  feeLamports BigInt?
+  sourceAddress String
+  destinationAddress String
+  mint String
+  network String
+  reference String @unique
+  orderId String?
+  txSignature String? @unique
+  failureReason String?
+  createdAt DateTime @default(now())
+  finalizedAt DateTime?
+  @@index([customerId, createdAt])
+  @@index([status])
+}
+model CreditReservation {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  orderId String @unique
+  order Order @relation(fields:[orderId], references:[id])
+  amountAtomic BigInt
+  status ReservationStatus @default(ACTIVE)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([customerId, status])
+}
+// Design-only in this phase: gated by ENABLE_DELEGATED_PAYMENTS (default false).
+model DelegatedPermission {
+  id String @id @default(cuid())
+  walletId String
+  wallet CustomerWallet @relation(fields:[walletId], references:[id])
+  merchantAddress String
+  capAtomic BigInt
+  spentAtomic BigInt @default(0)
+  expiresAt DateTime
+  consentedAt DateTime
+  revokedAt DateTime?
+  @@index([walletId])
+}
+model WalletAuditEvent {
+  id String @id @default(cuid())
+  customerId String
+  action String
+  detail Json?
+  createdAt DateTime @default(now())
+  @@index([customerId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Customer purchase eligibility. A persisted, reviewer-controlled record that is
+// deliberately separate from Order.researchAcknowledgedAt (a per-order attestation).
+// Customers may only create/refresh a PENDING request; APPROVED/REJECTED are set by an
+// admin-token-protected review endpoint.
+// ---------------------------------------------------------------------------
+enum EligibilityStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+model CustomerEligibility {
+  id String @id @default(cuid())
+  customerId String @unique
+  customer Customer @relation(fields:[customerId], references:[id])
+  status EligibilityStatus @default(PENDING)
+  requestedAt DateTime @default(now())
+  reviewedAt DateTime?
+  reviewedBy String?
+  notes String?
 }

@@ -1,1 +1,2 @@
-import Link from 'next/link'; import { InfoPage } from '../../components/info-page'; export default function Account() { return <InfoPage eyebrow="CUSTOMER DASHBOARD" title="Your account."><div className="grid gap-4 sm:grid-cols-2"><Link className="border border-line p-6 text-ink" href="/orders"><b className="font-display text-2xl">Orders</b><span className="mt-2 block text-xs">Review order history and tracking.</span></Link><div className="border border-line p-6 text-ink"><b className="font-display text-2xl">Documentation</b><span className="mt-2 block text-xs">Access lot records for past orders.</span></div></div></InfoPage>; }
+import { AccountPage } from '../../components/account-views';
+export default function Account() { return <AccountPage />; }

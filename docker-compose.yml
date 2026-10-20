@@ -1,26 +1,114 @@
+# Local development / integration stack for Helix & Field.
+#
+#   cp .env.example .env            # then edit; .env is git-ignored and is the only place secrets live
+#   docker compose up --build       # postgres + redis + api + storefront + admin
+#   docker compose run --rm api migrate                     # apply Prisma migrations (never automatic by default)
+#   docker compose --profile test up -d postgres-test       # throwaway DB for integration tests (host port 54329)
+#
+# Nothing here is a production deployment. No secret values are baked in: credentials come from .env and
+# `${VAR:?}` makes compose refuse to start when a required one is missing.
+name: helix-field
+
+x-env-file: &env-file
+  - path: .env
+    required: false   # compose still starts without .env; required vars below fail fast with a clear message
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: helix
-      POSTGRES_PASSWORD: helix
-      POSTGRES_DB: helix_field
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
+    ports: ["127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"]
     volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"]
     volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
   api:
     build: { context: ., dockerfile: apps/api/Dockerfile }
-    env_file: .env
+    env_file: *env-file
     environment:
-      DATABASE_URL: postgresql://helix:helix@postgres:5432/helix_field?schema=public
+      # NODE_ENV=production is blocked by design today (AUTH_BACKEND gate in apps/api/src/auth/auth-startup.check.ts),
+      # so the local stack runs as development. Do not "fix" this by setting AUTH_BACKEND=configured.
+      NODE_ENV: ${API_NODE_ENV:-development}
+      PORT: "3001"
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
       REDIS_HOST: redis
-    depends_on: [postgres, redis]
-    ports: ["3001:3001"]
+      REDIS_PORT: "6379"
+      STOREFRONT_ORIGIN: ${STOREFRONT_ORIGIN:-http://localhost:3000}
+      # Migrations only run when explicitly switched on (or via `docker compose run --rm api migrate`).
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-false}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["127.0.0.1:${API_HOST_PORT:-3001}:3001"]
+    restart: unless-stopped
+
   storefront:
-    build: { context: ., dockerfile: apps/storefront/Dockerfile }
-    depends_on: [api]
-    ports: ["3000:3000"]
-volumes: { postgres_data: {}, redis_data: {} }
+    build:
+      context: .
+      dockerfile: apps/storefront/Dockerfile
+      args:
+        # Public URL the BROWSER uses to reach the API; inlined at build time (not a secret).
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:3001/v1}
+    environment:
+      PORT: "3000"
+    depends_on:
+      api: { condition: service_started }
+    ports: ["127.0.0.1:${STOREFRONT_HOST_PORT:-3000}:3000"]
+    restart: unless-stopped
+
+  admin:
+    build: { context: ., dockerfile: apps/admin/Dockerfile }
+    env_file: *env-file
+    environment:
+      PORT: "3002"
+      # Server-side calls from the admin container to the API over the compose network.
+      API_URL: http://api:3001/v1
+      # ADMIN_API_TOKEN is read from .env via env_file (no default on purpose: unset means admin calls fail closed).
+    depends_on:
+      api: { condition: service_started }
+    ports: ["127.0.0.1:${ADMIN_HOST_PORT:-3002}:3002"]
+    restart: unless-stopped
+
+  # Disposable Postgres for the integration suites. Not started by a plain `docker compose up`.
+  #   docker compose --profile test up -d postgres-test
+  #   TEST_DATABASE_URL=postgresql://<user>:<pw>@127.0.0.1:54329/helix_field_test?schema=public \
+  #     pnpm --filter @helix-field/api exec prisma migrate deploy   # with DATABASE_URL set to the same URL
+  #   TEST_DATABASE_URL=... node tests/run-all.mjs integration
+  # No volume: data disappears with the container. The suite TRUNCATES tables, so never point it at a real database.
+  postgres-test:
+    profiles: [test]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_TEST_DB:-helix_field_test}
+    ports: ["127.0.0.1:${POSTGRES_TEST_HOST_PORT:-54329}:5432"]
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  postgres_data: {}
+  redis_data: {}

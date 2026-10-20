@@ -1,2 +1,60 @@
-import { Module } from '@nestjs/common'; import { ConfigModule } from '@nestjs/config'; import { BullModule } from '@nestjs/bullmq'; import { LoggerModule } from 'nestjs-pino'; import { CatalogModule } from './catalog/catalog.module'; import { OrdersModule } from './orders/orders.module'; import { PaymentsModule } from './payments/payments.module'; import { PrismaService } from './prisma.service';
-@Module({ imports:[ConfigModule.forRoot({ isGlobal:true }), LoggerModule.forRoot({ pinoHttp: process.env.NODE_ENV === 'production' ? {} : { transport:{ target:'pino-pretty' } } }), BullModule.forRoot({ connection:{ host:process.env.REDIS_HOST ?? 'localhost', port:Number(process.env.REDIS_PORT ?? 6379) } }), CatalogModule, OrdersModule, PaymentsModule], providers:[PrismaService] }) export class AppModule {}
+import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule } from '@nestjs/throttler';
+import { ConfigModule } from '@nestjs/config';
+import { BullModule } from '@nestjs/bullmq';
+import { LoggerModule } from 'nestjs-pino';
+import { CatalogModule } from './catalog/catalog.module';
+import { OrdersModule } from './orders/orders.module';
+import { PaymentsModule } from './payments/payments.module';
+import { PrismaModule } from './prisma.module';
+import { AuthModule } from './auth/auth.module';
+import { ComplianceModule } from './compliance/compliance.module';
+import { WalletModule } from './wallet/wallet.module';
+import { CheckoutModule } from './wallet/checkout/checkout.module';
+import { checkoutPortProviders, ReconciliationScheduler } from './wallet/wallet.wiring';
+import { CHAIN_PORT } from './wallet/checkout/ports';
+import { RefundsModule } from './wallet/refunds/refunds.module';
+import { SOLANA_CHAIN } from './wallet/wallet.tokens';
+import { HealthModule } from './health/health.module';
+import { WalletAdminModule } from './wallet-admin/wallet-admin.module';
+import { assertValidEnv } from './config/env.validation';
+import { buildThrottlerModuleOptions, RouteAwareThrottlerGuard } from './config/rate-limit';
+import { isNonProductionRuntime } from './config/runtime';
+
+@Module({
+  imports: [
+    // Must stay first: it loads .env into process.env before the factories below read it. Warnings are logged once by main.ts.
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validate: (config: Record<string, unknown>) => {
+        assertValidEnv(config as Record<string, string | undefined>);
+        return config;
+      },
+    }),
+    ThrottlerModule.forRoot(buildThrottlerModuleOptions(process.env)),
+    LoggerModule.forRoot({
+      pinoHttp: {
+        // Never log credentials. Pretty transport only on exact development/test runtimes.
+        redact: { paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-admin-token"]', 'req.headers["x-customer-email"]'], censor: '[redacted]' },
+        ...(isNonProductionRuntime(process.env) ? { transport: { target: 'pino-pretty' } } : {}),
+      },
+    }),
+    BullModule.forRoot({ connection: { host: process.env.REDIS_HOST ?? 'localhost', port: Number(process.env.REDIS_PORT ?? 6379) } }),
+    PrismaModule,
+    CatalogModule,
+    OrdersModule,
+    PaymentsModule,
+    AuthModule,
+    ComplianceModule,
+    WalletModule,
+    CheckoutModule.register({ imports: [WalletModule], providers: checkoutPortProviders }),
+    WalletAdminModule,
+    // Admin-only (AdminTokenGuard). MERCHANT_SIGNER is intentionally NOT bound: no signer implementation ships in
+    // this repo, so POST /admin/refunds/:id/submit fails closed with 503. Bind a KMS/HSM-backed signer here later.
+    RefundsModule.register({ imports: [WalletModule], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }] }),
+    HealthModule,
+  ],
+  providers: [ReconciliationScheduler, { provide: APP_GUARD, useClass: RouteAwareThrottlerGuard }],
+})
+export class AppModule {}

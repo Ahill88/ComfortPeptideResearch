@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 900" fill="none">
+  <title>Abstract study of connection — not a molecular structure</title>
+  <defs>
+    <radialGradient id="bg"><stop stop-color="white"/><stop offset="1" stop-color="#E2E8F0"/></radialGradient>
+    <radialGradient id="orb" cx=".3" cy=".25"><stop stop-color="white"/><stop offset=".35" stop-color="#E2E8F0"/><stop offset=".7" stop-color="#7DD3FC"/><stop offset="1" stop-color="#64748B"/></radialGradient>
+    <linearGradient id="line"><stop stop-color="#64748B" stop-opacity=".1"/><stop offset=".5" stop-color="#64748B"/><stop offset="1" stop-color="#7DD3FC" stop-opacity=".3"/></linearGradient>
+    <filter id="blur"><feGaussianBlur stdDeviation="28"/></filter>
+  </defs>
+  <path fill="url(#bg)" d="M0 0h900v900H0z"/>
+  <circle cx="450" cy="420" r="250" stroke="#64748B" stroke-opacity=".1"/>
+  <circle cx="450" cy="420" r="330" stroke="#64748B" stroke-opacity=".08"/>
+  <path d="M0 420h900M450 0v900" stroke="#64748B" stroke-opacity=".07"/>
+  <ellipse cx="465" cy="645" rx="205" ry="35" fill="#64748B" opacity=".12" filter="url(#blur)"/>
+  <g stroke="url(#line)" stroke-width="2">
+    <ellipse cx="450" cy="420" rx="280" ry="115" transform="rotate(-35 450 420)"/>
+    <ellipse cx="450" cy="420" rx="280" ry="115" transform="rotate(35 450 420)"/>
+    <ellipse cx="450" cy="420" rx="280" ry="115" transform="rotate(90 450 420)"/>
+  </g>
+  <g fill="url(#orb)"><circle cx="450" cy="420" r="65"/><circle cx="240" cy="288" r="27"/><circle cx="655" cy="291" r="34"/><circle cx="455" cy="698" r="22"/><circle cx="233" cy="553" r="17"/><circle cx="659" cy="550" r="24"/><circle cx="450" cy="142" r="14"/></g>
+  <g fill="#64748B" font-family="monospace" font-size="10" letter-spacing="3"><text x="40" y="53">FIELD STUDY / 001</text><text x="40" y="76">CONNECTION, ABSTRACTED</text></g>
+  <path d="M40 110h50M65 85v50M810 735h50M835 710v50" stroke="#64748B" stroke-opacity=".4"/>
+</svg>

@@ -1,13 +1,152 @@
 name: CI
-on: [push, pull_request]
+
+on:
+  push:
+  pull_request:
+
+# Least privilege for every job unless a job narrows/extends it explicitly.
+permissions:
+  contents: read
+
+# Cancel superseded runs of the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22"
+
 jobs:
   validate:
+    name: Lint, build, unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      # The pnpm version is read from the root package.json "packageManager" field (pnpm@12.14.0).
+      - uses: pnpm/action-setup@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: 22, cache: npm }
-      - run: npm ci
-      - run: npm run prisma:generate --workspace=@helix-field/api
-      - run: npm run build --workspace=@helix-field/storefront
-      - run: npm run build --workspace=@helix-field/api
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # Root "postinstall" runs `prisma generate` for the API; pnpm.allowBuilds is in pnpm-workspace.yaml.
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      # node tests/run-all.mjs. Integration suites are reported as SKIPPED here (no TEST_DATABASE_URL in this job);
+      # they run in the `integration` job below.
+      - name: Test
+        run: pnpm test
+
+  integration:
+    name: Postgres integration + migration drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: helix
+          POSTGRES_PASSWORD: helix
+          POSTGRES_DB: helix_field_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U helix -d helix_field_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://helix:helix@localhost:5432/helix_field_test?schema=public
+      # Throwaway service-container DB. Set ONLY in this job so the `validate` job keeps reporting integration suites
+      # as SKIPPED. tests/wallet/e2e.integration.test.ts refuses anything that is not a local DB named *helix*/*test*.
+      TEST_DATABASE_URL: postgresql://helix:helix@localhost:5432/helix_field_test?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Apply migrations (prisma migrate deploy)
+        run: pnpm --filter @helix-field/api exec prisma migrate deploy --schema prisma/schema.prisma
+
+      # Fails (exit code 2) when schema.prisma describes anything the committed migrations do not produce,
+      # i.e. someone edited the schema without adding a migration.
+      - name: Detect schema / migration drift
+        run: >-
+          pnpm --filter @helix-field/api exec prisma migrate diff
+          --from-url "$DATABASE_URL"
+          --to-schema-datamodel prisma/schema.prisma
+          --exit-code
+
+      # The `integration` argument filters tests/run-all.mjs to *.integration.test.ts (TEST_DATABASE_URL is set job-wide).
+      - name: Integration suites
+        run: node tests/run-all.mjs integration
+
+  dependency-audit:
+    name: Dependency audit (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # Audit reads the lockfile; --ignore-scripts avoids running build scripts for a read-only check.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Allowed to fail so advisories never block merges, but the result is surfaced in the run summary and as a
+      # warning annotation. Review it; do not treat a green job as "no vulnerabilities".
+      - name: pnpm audit --prod
+        continue-on-error: true
+        run: |
+          set +e
+          pnpm audit --prod 2>&1 | tee audit.txt
+          status=${PIPESTATUS[0]}
+          {
+            echo "### pnpm audit --prod (exit code ${status})"
+            echo '```'
+            tail -n 60 audit.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::warning title=pnpm audit reported issues::pnpm audit --prod exited ${status}; see the job summary."
+          fi
+          exit "$status"
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read # gitleaks-action lists PR commits to scan
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks scans history
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Organization-owned repos additionally need GITLEAKS_LICENSE; personal-account repos do not.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}

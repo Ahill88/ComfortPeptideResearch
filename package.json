@@ -1,12 +1,17 @@
 {
   "name": "helix-field-platform",
   "private": true,
-  "workspaces": ["apps/*"],
+  "packageManager": "pnpm@12.14.0",
   "scripts": {
-    "dev": "npm run dev --workspace=@helix-field/storefront",
-    "dev:api": "npm run start:dev --workspace=@helix-field/api",
-    "build": "npm run build --workspaces",
-    "lint": "npm run lint --workspaces"
+    "dev": "turbo dev --filter=@helix-field/storefront",
+    "dev:api": "turbo dev --filter=@helix-field/api",
+    "dev:admin": "turbo dev --filter=@helix-field/admin",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "test": "node tests/run-all.mjs",
+    "db:generate": "pnpm --filter=@helix-field/api prisma:generate",
+    "postinstall": "pnpm --filter=@helix-field/api prisma:generate"
   },
+  "devDependencies": { "turbo": "^2.3.3" },
   "engines": { "node": ">=20" }
 }

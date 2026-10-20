@@ -1,0 +1,563 @@
+[
+  {
+    "file": "ghk-cu-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38212,
+    "sha256": "e24d57fb7c7205ad6573ad8b4344f73e3faee44d7ca6cfb8281f041616df58c6",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "ghk-cu-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 41102,
+    "sha256": "b2cd8f55b13de957891fc9fef24fbc104f403c4a0ade28fcf01dbf5741a578c1",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "ghk-cu-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39444,
+    "sha256": "fb050784bd7d91da80b87e138c353f34c6d09ca1b8542361a363fde52c64b058",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bpc-157-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 41880,
+    "sha256": "bfd3b3252349d8c955c2dd4f4c82d9ced8875897eb836a8d9b4f1d73bce5e535",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bpc-157-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 43464,
+    "sha256": "3bbd3bb3bd4b26732fb413ecdd2517651af8e02f6545c5637325b9dce7901fda",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bpc-157-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 42682,
+    "sha256": "b44416534fce450e4b3dba3973a53b16b9315ae1de873077c0469f42bbcfbb06",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tb-500-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39298,
+    "sha256": "70ce69db1faa14c6909663ee0e1a356e4bc82a76a31685da7e8bb78bda200c5d",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tb-500-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40320,
+    "sha256": "39174c26b90763acb66a542e155524e543cdb012f2c55f359ff5f74a844e4543",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tb-500-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39010,
+    "sha256": "f595c97a126ced4660ffad68050e280899228b3273bc364275f59ef24b1df87e",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "reta-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 33242,
+    "sha256": "b0788364db52c122a606931155da46a6b97c9dc3ecfba24af89644f5570c6962",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "reta-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 37314,
+    "sha256": "3ee8c8207cd20e06ef415816ea24008400d636bd479805371bbdce2a865b2b96",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "reta-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 34770,
+    "sha256": "2fab61371e7afca262f204434f92c8487c36ab22b9f08bd1458bfc0b61857048",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tirz-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38664,
+    "sha256": "2812479be51573e4e62647a1ee019eeb7cb6db3d24f5450ed050bb4dd8a12b5e",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tirz-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38372,
+    "sha256": "27496f43bd3f8a7b9972338c0b800be0e5636e53e3c809e4a89986b0ceeebf4e",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tirz-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40906,
+    "sha256": "274e1d66a4789e479f46e1113436a782448c3b10d999220ac290d46268ba5df8",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "semax-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 37276,
+    "sha256": "8e1c2edf8d72d792f584a1ca8550974151367e1e7aa43f1b417aaf363158d1d3",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "semax-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 41208,
+    "sha256": "f877115724e47ea636f10db258512b8b4d9343f6f876f9889fb20b77ddbcbda4",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "semax-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40728,
+    "sha256": "42e05eac4df22eb53f3520eb22c5123f75d7d8a95360d33d8e8960e0b0788433",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "selank-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 37374,
+    "sha256": "d262f2df14e61b3a4cfbd8369246e3df0a0b01ec6ce3784173576d54c7b13f1c",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "selank-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38458,
+    "sha256": "29d88c094d28c8ec6a8eed612f5375e029b3378bdf5e0c4cd5e5fff5030fb4d3",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "selank-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 36408,
+    "sha256": "277f5b0b5ab5f41ebe08a3a6fd7f27e9e439a9ad33ebb4da42aab6295d28999d",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "klow-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 35654,
+    "sha256": "020704a33ba8a1659b2777d074aeccdad9af2b364218f7f75731cf9004adb987",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "klow-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40136,
+    "sha256": "aaedf545d7cf7c18d4da51c95e4c5d26f83a86c41c305b596679d09fcfc12134",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "klow-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 36178,
+    "sha256": "141bb046c9bcbddff19bc5a8be3b149a78881838dfec12a38f07f74a40261d19",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "ipamorelin-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38900,
+    "sha256": "2b4769ffd58ef227aaf8e255feee95119406805be9468c016757cb663ce37ece",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "ipamorelin-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40804,
+    "sha256": "cc4df0fcd6252f2d80c02001e8c9f39b3fb033057641999631b8091ee3c8434a",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "ipamorelin-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39554,
+    "sha256": "a244cdfa0bb6d6fb53fdd82d0fc1d50b15585e0c1c6df614af75dbdb5c09656a",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tesamorelin-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40120,
+    "sha256": "22cde7ac8b54c758ab7d444932e95025a85cee4ffd7f716a64823ee030a9d573",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tesamorelin-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 43754,
+    "sha256": "cc0269e89be87df27f1759c026ed917f2b3dacc1db04a6ace5224ff04e87146f",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "tesamorelin-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39202,
+    "sha256": "9b4cc75b42de5c09c21cd960d536defe1ffdd19c067505d110011c0e755141f4",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "mots-c-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 40746,
+    "sha256": "4ced83236695663ced7cdd8b877f69a05cb500dce3b4636a3c79d3b2d80f751e",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "mots-c-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 42130,
+    "sha256": "bf297c2281c73211aecac66d3eb17a15ff511cf78e8d01f3dd380ea678498e3e",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "mots-c-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 41380,
+    "sha256": "cf01c13473e4283b5dd0f73350eff408908fc65fd523d2d1e55427bf3f3cf716",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "nad-plus-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 37418,
+    "sha256": "a05574b607aeca26c6850916e51d4fff63d91c9aad313fa8893f4b5b5a8a21dc",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "nad-plus-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39384,
+    "sha256": "f42f10b1d34d0805c34986b94cfa6313753cdee722767cc2d4cf1f99bbea07e4",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "nad-plus-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38604,
+    "sha256": "c008b40787d38301e4bf97eae6457b8363cb3900fb37ecaa02a00175b742daa3",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "kpv-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 34106,
+    "sha256": "8138acf915b3faa91de054f337f4ebdcd88750992bfd918f3fb4b8049d2653e0",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "kpv-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 37318,
+    "sha256": "03c6582dfd2ff32ce5469b97770bdc95fe39e40bea568c059b07ef33c642166b",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "kpv-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 33940,
+    "sha256": "349488f0248a327a2e77ff9155560dad47af73b2ff149656adac97d435c61c5b",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "epithalon-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38504,
+    "sha256": "18e2b97c18d623757b828cc10e1a52828f11783ff5786c5d71ba6979acee2bf7",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "epithalon-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 41626,
+    "sha256": "ef8326d00dbddfe19c1f065b493b0db6a38bb7c1a1270d20b9961439837fa753",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "epithalon-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39374,
+    "sha256": "ec8ea26df13cb31abee90b47fb6ccf480881d89a300cc682031048f94b746831",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "thymosin-alpha-1-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 38108,
+    "sha256": "b7df87e652656b6f85a8039cac6987b8d3a5556dcfb83e77341626aac51597da",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "thymosin-alpha-1-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 44820,
+    "sha256": "5de5326646c98ae831400d7399b8944f0e9be5b28f1dca7a25ecd1f34b3137da",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "thymosin-alpha-1-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 39942,
+    "sha256": "10ab1c041b00922ce3763f0cb84ac35f87ee54dd90f31b1afd5d7d7cf0fce2f6",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "cjc-1295-ipamorelin-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 42072,
+    "sha256": "2d55a82585736d6ffc36802406348f6eb5771a8c303acaea4b6d11b3d050634b",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "cjc-1295-ipamorelin-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 48718,
+    "sha256": "d6e3951d5e2606103c5fcc3c274e98582ef56ebec48f1a8acd2dc8eaec5ea0c7",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "cjc-1295-ipamorelin-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 42614,
+    "sha256": "8090b83dcc1038dda52b92edc547fcc29454d3b4a16c0c834c604b9ff6953879",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bac-water-overview.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 34534,
+    "sha256": "d965a5aa760391a57fe1b5c1b1ccc054d617d7ee76546621c85cc021d26ee7c6",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bac-water-detail.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 42602,
+    "sha256": "c23bc6a5c1662c985f068dc69088c32ce377d2d1b01ea196d44168efddb4d915",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  },
+  {
+    "file": "bac-water-angle.webp",
+    "dimensions": [
+      2048,
+      2048
+    ],
+    "bytes": 36062,
+    "sha256": "af0c3290accaba806ca81b76d8c2a11af290354f2748b0aea1e6dbe9afe5c600",
+    "source": "Original procedural Blender Cycles render",
+    "disclosure": "Concept packaging; not verified product photography"
+  }
+]

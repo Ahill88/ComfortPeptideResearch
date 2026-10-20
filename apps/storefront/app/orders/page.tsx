@@ -1,1 +1,2 @@
-import { InfoPage } from '../../components/info-page'; export default function Orders() { return <InfoPage eyebrow="ORDER HISTORY" title="Orders."><div className="border-y border-line py-8 text-center">No orders are associated with this account.</div></InfoPage>; }
+import { OrdersPage } from '../../components/account-views';
+export default function Orders() { return <OrdersPage />; }

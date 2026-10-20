@@ -1,7 +1,18 @@
 node_modules
 .next
+.next-dev
 dist
+.turbo
 .env
 .env.local
+.env.*
+!.env.example
+*.pem
+*.key
 coverage
 *.log
+*.tsbuildinfo
+
+# Large design source art (kept locally; not for plain git)
+tools/catalog-art/masters/
+docs/design/catalog-imagery/*.zip

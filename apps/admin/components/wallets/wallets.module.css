@@ -1,0 +1,67 @@
+.readOnly { align-items: flex-start; background: #fff8e6; border: 1px solid #e0c36f; border-left-width: 5px; color: #4d3b0a; display: flex; font-size: 14px; gap: 12px; line-height: 1.45; margin: 0 0 22px; padding: 14px 16px; }
+.readOnly strong { color: #3a2c05; }
+.readOnlyIcon { flex: none; font: 600 11px 'DM Mono', monospace; letter-spacing: .08em; text-transform: uppercase; }
+
+.tabs { border-bottom: 1px solid #dfdfd6; display: flex; gap: 4px; margin: 0 0 26px; overflow-x: auto; padding: 0 0 1px; scrollbar-width: thin; }
+.tab { border-bottom: 2px solid transparent; color: #55655c; flex: 0 0 auto; font-size: 13px; padding: 10px 12px; white-space: nowrap; }
+.tab:hover { background: #ecefe3; color: #17251f; }
+.tabActive { border-bottom-color: #244a40; color: #17251f; font-weight: 600; }
+
+.heading { padding: 38px 0 22px; }
+.heading h1 { margin-bottom: 8px; }
+
+.tableRegion { background: #fff; border: 1px solid #e2e4db; overflow-x: auto; }
+.table { border-collapse: collapse; font-size: 12px; min-width: 640px; width: 100%; }
+.table caption { caption-side: top; color: #51645a; font-size: 12px; padding: 14px 16px; text-align: left; }
+.table th { background: #f1f3ea; color: #4c5d54; font: 500 10px 'DM Mono', monospace; letter-spacing: .08em; padding: 10px 14px; text-align: left; text-transform: uppercase; white-space: nowrap; }
+.table td { border-top: 1px solid #e9ebe4; padding: 12px 14px; vertical-align: top; }
+.table tbody tr:hover { background: #fafbf6; }
+.mono { font-family: 'DM Mono', monospace; font-size: 11px; overflow-wrap: anywhere; word-break: break-all; }
+.num { font-family: 'DM Mono', monospace; text-align: right; white-space: nowrap; }
+.muted { color: #718078; }
+
+.pager { align-items: center; display: flex; gap: 14px; justify-content: space-between; margin-top: 14px; }
+.pagerLink { border: 1px solid #bdc9be; color: #305046; font-size: 12px; padding: 8px 12px; }
+.pagerLink:hover { background: #ecefe3; }
+.pagerEnd { color: #718078; font-size: 12px; }
+
+.filters { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 16px; }
+.filterLabel { color: #718078; font: 500 10px 'DM Mono', monospace; letter-spacing: .08em; margin-right: 6px; text-transform: uppercase; }
+.filter { border: 1px solid #cfd6cb; color: #3f5148; font: 500 11px 'DM Mono', monospace; padding: 5px 9px; }
+.filter:hover { background: #ecefe3; }
+.filterActive { background: #244a40; border-color: #244a40; color: #fff; }
+.filterActive:hover { background: #183d35; }
+
+.state { background: #fff; border: 1px solid #e2e4db; border-left-width: 5px; padding: 18px 20px; }
+.state h2 { font-size: 20px; margin: 0 0 8px; }
+.state p { color: #51645a; font-size: 13px; line-height: 1.55; margin: 0; }
+.stateError { border-left-color: #bc6856; background: #fdf5f3; }
+.stateEmpty { border-left-color: #b9c4b6; }
+
+.badge { border-radius: 10px; display: inline-block; font: 500 10px 'DM Mono', monospace; padding: 4px 8px; white-space: nowrap; }
+.good { background: #e1f0e1; color: #2f6347; }
+.warn { background: #f7eedc; color: #7d5c20; }
+.bad { background: #f4e3df; color: #8a4034; }
+.neutral { background: #e8ebe2; color: #44564c; }
+
+.sectionGap { margin-top: 34px; }
+.sectionTitle { font-size: 22px; margin: 0 0 14px; }
+.note { background: #e5eddf; border: 1px solid #d5dfd0; color: #3f5148; font-size: 13px; line-height: 1.5; margin: 0 0 16px; padding: 12px 16px; }
+.cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 20px; }
+.cards .card { min-height: 0; }
+.cards .card strong { font-size: 28px; margin-bottom: 8px; }
+.dl { display: grid; gap: 0; grid-template-columns: minmax(160px, 1fr) 2fr; margin: 0; }
+.dl dt, .dl dd { border-top: 1px solid #e9ebe4; font-size: 13px; margin: 0; padding: 11px 0; }
+.dl dt { color: #51645a; }
+.dl dd { font-weight: 500; }
+
+.tab:focus-visible, .pagerLink:focus-visible, .filter:focus-visible, .tableRegion:focus-visible { outline: 3px solid #1d6f5a; outline-offset: 2px; }
+.srOnly { clip: rect(0 0 0 0); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
+
+@media (max-width: 720px) {
+  .heading { padding: 24px 0 16px; }
+  .dl { grid-template-columns: 1fr; }
+  .dl dt { border-bottom: 0; padding-bottom: 0; }
+  .dl dd { border-top: 0; padding-top: 2px; }
+  .pager { flex-direction: column; align-items: stretch; text-align: center; }
+}
