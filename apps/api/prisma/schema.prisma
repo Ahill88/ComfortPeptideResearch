@@ -57,6 +57,7 @@ model Lot {
   coaKey String
   purity Decimal @db.Decimal(5,2)
   releasedAt DateTime @default(now())
+  coas Coa[]
 }
 model Order {
   id String @id @default(cuid())
@@ -339,4 +340,76 @@ model OrderEvent {
   adminId String?
   createdAt DateTime @default(now())
   @@index([orderId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Certificates of analysis (COAs). The outside lab's PDF is stored with its SHA-256; admins publish a version (OWNER only) which
+// supersedes the previous published one. The hash (not the PDF or results) is anchored on Solana in a Memo (CoaAnchor).
+// A published COA is the PUBLIC record for its lot; Lot.purity/coaKey are kept in sync on publish for existing readers.
+// An anchor proves the document existed unchanged at a time and is linked to the lot; it does NOT prove the lab's results are true.
+// ---------------------------------------------------------------------------
+enum CoaStatus {
+  DRAFT
+  PUBLISHED
+  SUPERSEDED
+  REVOKED
+}
+enum AnchorKind {
+  PUBLISH
+  REVOKE
+}
+enum AnchorStatus {
+  PENDING
+  CONFIRMED
+  FAILED
+}
+model Coa {
+  id String @id @default(cuid())
+  lotId String
+  lot Lot @relation(fields:[lotId], references:[id])
+  version Int
+  status CoaStatus @default(DRAFT)
+  labName String
+  labReportId String
+  testedAt DateTime @db.Date
+  method String
+  purityPercent Decimal @db.Decimal(5,2)
+  notes String?
+  fileName String
+  fileSize Int
+  fileSha256 String
+  createdByAdminId String?
+  createdAt DateTime @default(now())
+  publishedByAdminId String?
+  publishedAt DateTime?
+  revokedByAdminId String?
+  revokedAt DateTime?
+  revokeReason String?
+  file CoaFile?
+  anchors CoaAnchor[]
+  @@unique([lotId, version])
+  @@index([fileSha256])
+  @@index([lotId, status])
+}
+model CoaFile {
+  coaId String @id
+  coa Coa @relation(fields:[coaId], references:[id])
+  bytes Bytes
+}
+model CoaAnchor {
+  id String @id @default(cuid())
+  coaId String
+  coa Coa @relation(fields:[coaId], references:[id])
+  kind AnchorKind
+  memo String
+  network String
+  txSignature String? @unique
+  status AnchorStatus @default(PENDING)
+  slot BigInt?
+  blockTime DateTime?
+  error String?
+  attempts Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([coaId, kind])
 }
