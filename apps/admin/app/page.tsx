@@ -44,6 +44,9 @@ export default async function Overview() {
         <li><Link href="/orders">Fulfilment queue</Link></li>
         <li><Link href="/lots">Lots &amp; COAs</Link></li>
         <li><Link href="/products">Products</Link></li>
+        <li><Link href="/inventory">Inventory</Link></li>
+        <li><Link href="/compliance">Compliance</Link></li>
+        {auth.admin.role === 'OWNER' && <li><Link href="/email">Email outbox</Link></li>}
         <li><Link href="/wallets">Wallet reporting</Link></li>
         {auth.admin.role === 'OWNER' && <li><Link href="/team">Team</Link></li>}
         {auth.admin.role === 'OWNER' && <li><Link href="/audit">Audit log</Link></li>}

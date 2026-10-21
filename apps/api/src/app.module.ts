@@ -20,12 +20,20 @@ import { CoaAnchorModule } from './coa/anchor/anchor.module';
 import { AdminCoreModule } from './admin/admin-core.module';
 import { AdminAuthModule } from './admin/auth/admin-auth.module';
 import { AdminOrdersModule } from './admin/orders/admin-orders.module';
+import { AdminInventoryModule } from './admin/inventory/admin-inventory.module';
+import { CommerceModule } from './commerce/commerce.module';
+import { AdminOrderRefundModule } from './admin/orders/admin-order-refund.module';
 import { CoaModule } from './coa/coa.module';
 import { HealthModule } from './health/health.module';
+import { SanctionsModule } from './compliance/sanctions/sanctions.module';
+import { EmailModule } from './email/email.module';
 import { WalletAdminModule } from './wallet-admin/wallet-admin.module';
 import { assertValidEnv } from './config/env.validation';
 import { buildThrottlerModuleOptions, RouteAwareThrottlerGuard } from './config/rate-limit';
 import { isNonProductionRuntime } from './config/runtime';
+
+/** One value, imported twice: the admin order refund routes must share the RefundsService (signer, chain, locks) with the token routes. */
+const refundsModule = RefundsModule.register({ imports: [WalletModule], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }] });
 
 @Module({
   imports: [
@@ -59,15 +67,23 @@ import { isNonProductionRuntime } from './config/runtime';
     WalletAdminModule,
     // Admin-only (AdminTokenGuard). MERCHANT_SIGNER is intentionally NOT bound: no signer implementation ships in
     // this repo, so POST /admin/refunds/:id/submit fails closed with 503. Bind a KMS/HSM-backed signer here later.
-    RefundsModule.register({ imports: [WalletModule], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }] }),
+    refundsModule,
     AdminCoreModule,
     AdminAuthModule,
     AdminOrdersModule,
+    // Stock holds, shipping/tax totals and the unpaid-order sweep (global: INVENTORY_PORT, InventoryService, ShippingTaxCalculator).
+    CommerceModule,
+    AdminInventoryModule,
+    // Owner refund routes for orders (POST /admin/orders/:id/refund[/submit|/verify]); delegates to the RefundsService above.
+    AdminOrderRefundModule.register(refundsModule),
     // COA core + public verification API. Anchoring (COA_ANCHOR_PORT / COA_ANCHOR_INFO) is injected optionally from the global CoaAnchorModule.
     CoaModule,
     // On-chain COA anchoring (global; strict COA_ANCHOR_* config; the publisher signer is NOT bound here, see anchor.module.ts).
     CoaAnchorModule,
     HealthModule,
+    // Sanctions address screening (global; binds COMPLIANCE_SCREEN, daily OFAC SDN refresh, admin endpoints).
+    SanctionsModule,
+    EmailModule,
   ],
   providers: [ReconciliationScheduler, { provide: APP_GUARD, useClass: RouteAwareThrottlerGuard }],
 })

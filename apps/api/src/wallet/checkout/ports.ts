@@ -12,6 +12,16 @@ export { FEE_PAYER_SIGNER, type FeePayerSigner } from './fee-payer-signer.port';
 export const CHAIN_PORT = Symbol('CHECKOUT_CHAIN_PORT');
 export type ChainPort = SolanaChain;
 
+/**
+ * Provide (OPTIONAL): chain readiness, i.e. the boot-time chain preflight (chain/chain-preflight.ts). When bound and not ready
+ * (RPC down at boot, wrong cluster, wrong mint) prepare and submit refuse with 503. Unbound means "no preflight" (unit tests).
+ */
+export const CHAIN_READINESS_PORT = Symbol('CHECKOUT_CHAIN_READINESS_PORT');
+export interface ChainReadinessPort {
+  isReady(): boolean;
+  reason(): string;
+}
+
 /** Provide: spendable balance for a customer (finalized - pending outgoing - active reservations). */
 export const BALANCE_PORT = Symbol('CHECKOUT_BALANCE_PORT');
 export interface BalancePort {
@@ -81,8 +91,11 @@ export interface PreparedMessageStore {
 export interface CheckoutConfig {
   /** Merchant USDC treasury owner address (env SOLANA_USDC_TREASURY). */
   treasury: string | undefined;
-  /** Mint to use on mainnet. Unset => mainnet purchases are refused even when the mainnet flag is on. */
-  mainnetUsdcMint: string | undefined;
+  /**
+   * @deprecated IGNORED. The mint comes from the chain (`chain.usdcMint`, env SOLANA_USDC_MINT), the one mint source.
+   * Kept optional only so older fixtures still type-check; loadCheckoutConfig no longer reads SOLANA_USDC_MAINNET_MINT.
+   */
+  mainnetUsdcMint?: string | undefined;
   reservationTtlMs: number;
   /** A prepared message older than this is rebuilt (fresh blockhash) on re-prepare. */
   messageReuseMs: number;
@@ -98,7 +111,6 @@ export interface CheckoutConfig {
 export function loadCheckoutConfig(env: NodeJS.ProcessEnv = process.env): CheckoutConfig {
   return {
     treasury: env.SOLANA_USDC_TREASURY?.trim() || undefined,
-    mainnetUsdcMint: env.SOLANA_USDC_MAINNET_MINT?.trim() || undefined,
     reservationTtlMs: 15 * 60_000,
     messageReuseMs: 20_000,
     // Throws on a malformed FEE_SPONSORSHIP / FEE_SPONSOR_* value: the API refuses to start.

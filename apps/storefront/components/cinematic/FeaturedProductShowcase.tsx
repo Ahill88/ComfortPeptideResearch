@@ -20,7 +20,7 @@ export function FeaturedProductShowcase() {
         <h2 id="featured-product-title" className="heading-section">{product.name}</h2>
         <p className="mt-4 text-xs text-slate-500"><ProductPreviewLabel product={product} /></p>
         <p className="mt-6 text-2xl tracking-tight"><ProductPrice product={product} /></p>
-        <p className="mt-5 max-w-md text-sm leading-7 text-slate-600">Explore this material’s catalog entry for technical specifications and product details. For laboratory research use only.</p>
+        <p className="mt-5 max-w-md text-sm leading-7 text-slate-600">Explore this material’s catalog entry for technical specifications, purity data, and product details. For laboratory research use only.</p>
         <div className="mt-8"><PremiumButton href={`/catalog/${product.slug}`}>View {product.name} Details</PremiumButton></div>
       </ScrollReveal>
     </div>

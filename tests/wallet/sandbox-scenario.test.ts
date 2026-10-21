@@ -60,7 +60,7 @@ function loadClasses(): Classes {
     if (typeof proto[m] !== 'function') need.push(`SandboxSolanaChain.${m}()`);
   }
   if (classes.CheckoutService.length !== 7) need.push(`CheckoutService constructor (prisma, chain, balances, wallets, flags, store, config) - found ${classes.CheckoutService.length} params`);
-  if (classes.VerificationService.length !== 4) need.push(`VerificationService constructor (prisma, chain, flags, fulfillment) - found ${classes.VerificationService.length} params`);
+  if (classes.VerificationService.length !== 5) need.push(`VerificationService constructor (prisma, chain, flags, fulfillment, email) - found ${classes.VerificationService.length} params`);
   for (const m of ['prepare', 'submit', 'status']) if (typeof classes.CheckoutService.prototype[m] !== 'function') need.push(`CheckoutService.${m}()`);
   if (typeof classes.VerificationService.prototype.verifyAndSettle !== 'function') need.push('VerificationService.verifyAndSettle()');
   if (need.length) assert.fail(`wire up scenario: the scenario expects ${need.join(', ')}. Update tests/wallet/sandbox-scenario.test.ts wiring to the new signatures.`);
@@ -208,7 +208,7 @@ async function buildWorld(opts: { flags?: Record<string, boolean>; fundAtomic?: 
   const config = { treasury, mainnetUsdcMint: undefined, reservationTtlMs: 15 * 60_000, messageReuseMs: 20_000, nodeEnv: 'test' };
   const store = new C.InMemoryPreparedMessageStore();
   const checkout = new C.CheckoutService(db, chain, balances, walletLookup, flags, store, config);
-  const verification = new C.VerificationService(db, chain, flags, fulfillment);
+  const verification = new C.VerificationService(db, chain, flags, fulfillment, null);
   const mint = new PublicKey(contracts().USDC_DEVNET_MINT);
   return { C, chain, db, owner, stranger, treasury, customerId, orderId, balances, checkout, verification, fulfillmentCalls, flags, mint, wallets };
 }

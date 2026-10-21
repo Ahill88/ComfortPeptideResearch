@@ -20,7 +20,7 @@ const now = Date.now();
 const ago = (minutes) => new Date(now - minutes * 60_000).toISOString();
 
 // ---------------------------------------------------------------- state
-let admins, tokens, audit, orders, config, requestLog, seq, products, lots, coas;
+let admins, tokens, audit, orders, config, requestLog, seq, products, lots, coas, stock, movements, sanctions, outbox, refundChecks, released;
 
 function reset() {
   seq = 1000;
@@ -43,10 +43,13 @@ function reset() {
     retryOutcome: 'confirm',
     anchorDelayMs: 4000,
     requirePublishedCoa: true, // emulates REQUIRE_PUBLISHED_COA=true for product publish
+    signerAvailable: true, refundOutcome: 'finalize', refundChecks: 2, refundVerifyError: false,
+    sanctionsOutcome: 'ok', failInventory: false, failEmail: false,
   };
   requestLog = [];
   orders = buildOrders();
   buildCoaData();
+  buildOperations();
 }
 
 const ITEM = {
@@ -64,10 +67,14 @@ const sig = (n) => Array.from({ length: 88 }, (_, i) => B58[(n * 7 + i * 13 + (i
 function makeOrder(n, cfg) {
   const id = `cmoa1x9k${String(n).padStart(4, '0')}fk2c7d9e0f${String(n).padStart(5, '0')}`;
   const items = cfg.items.map(([key, quantity], i) => ({ id: `${id}_i${i}`, ...ITEM[key], lotCode: cfg.noLot === key ? null : LOTS[key], quantity }));
-  const totalCents = items.reduce((s, it) => s + it.unitCents * it.quantity, 0) + (cfg.shippingCents ?? 0);
+  const subtotalCents = items.reduce((s, it) => s + it.unitCents * it.quantity, 0);
+  const shippingCents = cfg.shippingCents ?? 0;
+  const taxCents = cfg.taxCents ?? (n === 4 ? 883 : 0);
+  const totalCents = subtotalCents + shippingCents + taxCents;
   const events = [{ id: `${id}_e0`, kind: 'STATUS', fromStatus: null, toStatus: 'PENDING_PAYMENT', note: null, adminName: null, createdAt: ago(cfg.ageMin + 12) }];
   const order = {
     id, status: 'PENDING_PAYMENT', totalCents, currency: 'USD', createdAt: ago(cfg.ageMin + 12),
+    subtotalCents: n === 6 ? null : subtotalCents, shippingCents: n === 6 ? 0 : shippingCents, taxCents: n === 6 ? 0 : taxCents, refund: null,
     customer: { id: `cus_${n}`, email: cfg.email, name: cfg.name ?? null },
     itemCount: items.reduce((s, it) => s + it.quantity, 0),
     hasShipment: false, trackingNumber: null,
@@ -419,6 +426,144 @@ async function handleCoaRoutes(route, method, req, res, url, admin) {
   return null;
 }
 
+// ---------------------------------------------------------------- commerce operations (actual controller/service shapes)
+function buildOperations() {
+  stock = products.map((p, i) => ({ productId: p.id, sku: p.sku, name: p.name, active: p.active, onHand: p.inventory, reserved: i === 0 ? 7 : 0, lowStockThreshold: i === 0 ? 20 : i === 1 ? 64 : 5 }));
+  movements = [{ id: 'movement_reserve', productId: 'prd_bpc157', delta: -2, kind: 'ORDER_RESERVE', reason: null, orderId: orders[0].id, adminName: null, createdAt: ago(26) }];
+  sanctions = { source: 'https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML', lastRun: { fetchedAt: ago(60), entryCount: 1050, status: 'OK', error: null }, addressCount: 1050 };
+  outbox = Array.from({ length: 57 }, (_, i) => ({ id: `email_${String(i).padStart(3, '0')}`, toDomain: i % 2 ? 'research.example.test' : 'example.test', template: ['email_verification', 'password_reset', 'order_confirmation', 'order_shipped'][i % 4], status: ['FAILED', 'PENDING', 'SENDING', 'SENT'][i % 4], attempts: i % 4 === 0 ? 8 : i % 4 === 1 ? 0 : 1, lastError: i % 4 === 0 ? 'Provider unavailable [redacted]' : null, createdAt: ago(i + 1), sentAt: i % 4 === 3 ? ago(i) : null }));
+  refundChecks = new Map(); released = new Set();
+}
+function stockItem(p) { return { productId: p.productId, sku: p.sku, name: p.name, active: p.active, onHand: p.onHand, reserved: p.reserved, lowStockThreshold: p.lowStockThreshold, lowStock: p.lowStockThreshold !== null && p.onHand <= p.lowStockThreshold }; }
+function fail(status, message) { throw Object.assign(new Error(message), { status }); }
+function opPage(rows, url, kind, defaultLimit) {
+  const limit = Number(url.searchParams.get('limit') ?? defaultLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail(400, 'limit must be between 1 and 100.');
+  let cursor = null;
+  const encoded = url.searchParams.get('cursor');
+  if (encoded) {
+    try { if (encoded.length > 200 || !/^[A-Za-z0-9_-]+$/.test(encoded)) throw Error(); cursor = JSON.parse(Buffer.from(encoded, 'base64url').toString()); } catch { fail(400, 'Invalid cursor.'); }
+    if (kind === 'stock' ? typeof cursor?.s !== 'string' : kind === 'ledger' ? !Number.isSafeInteger(cursor?.t) || typeof cursor?.i !== 'string' : !Array.isArray(cursor) || !Number.isSafeInteger(cursor[0]) || typeof cursor[1] !== 'string') fail(400, 'Invalid cursor.');
+  }
+  const ordered = [...rows].sort(kind === 'stock' ? (a, b) => a.sku.localeCompare(b.sku) : (a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
+  const filtered = !cursor ? ordered : ordered.filter((r) => kind === 'stock' ? r.sku.localeCompare(cursor.s) > 0 : new Date(r.createdAt).getTime() < (kind === 'ledger' ? cursor.t : cursor[0]) || (new Date(r.createdAt).getTime() === (kind === 'ledger' ? cursor.t : cursor[0]) && r.id < (kind === 'ledger' ? cursor.i : cursor[1])));
+  const items = filtered.slice(0, limit);
+  const last = items.at(-1);
+  const next = !last ? null : kind === 'stock' ? { s: last.sku } : kind === 'ledger' ? { t: new Date(last.createdAt).getTime(), i: last.id } : [new Date(last.createdAt).getTime(), last.id];
+  return { items, nextCursor: filtered.length > limit ? Buffer.from(JSON.stringify(next)).toString('base64url') : null };
+}
+
+async function handleOperations(route, method, req, res, url, admin) {
+  const owner = () => { if (admin.role !== 'OWNER') fail(403, FORBIDDEN_OWNER); };
+  const body = method === 'POST' ? await readBody(req) : {};
+  if (!body || typeof body !== 'object' || Array.isArray(body)) fail(400, 'A JSON body is required.');
+  if (method === 'POST') req.opsBody = body;
+  if (config.delayMs) await new Promise((r) => setTimeout(r, config.delayMs));
+  let m;
+  if (route.startsWith('/admin/inventory')) {
+    if (config.failInventory) fail(503, 'Internal database details must not appear.');
+    if (route === '/admin/inventory' && method === 'GET') {
+      const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
+      const low = url.searchParams.get('lowStockOnly');
+      if (q.length > 100 || (low !== null && !['true', 'false'].includes(low))) fail(400, 'Invalid inventory filters.');
+      const rows = stock.map(stockItem).filter((p) => (!q || `${p.sku} ${p.name}`.toLowerCase().includes(q)) && (low !== 'true' || p.lowStock));
+      return json(res, 200, opPage(rows, url, 'stock', 25));
+    }
+    if ((m = /^\/admin\/inventory\/([^/]+)\/(ledger|adjust|threshold)$/.exec(route))) {
+      if (m[2] === 'threshold') owner();
+      const p = stock.find((r) => r.productId === m[1]);
+      if (!p) fail(404, 'Product not found.');
+      if (m[2] === 'ledger' && method === 'GET') return json(res, 200, opPage(movements.filter((r) => r.productId === p.productId).map(({ productId, ...row }) => row), url, 'ledger', 50));
+      if (method === 'POST' && m[2] === 'adjust') {
+        if (Object.keys(body).some((k) => !['delta', 'reason'].includes(k)) || !Number.isInteger(body.delta) || !body.delta || Math.abs(body.delta) > 100000 || typeof body.reason !== 'string' || !body.reason.trim() || body.reason.trim().length > 200) fail(400, 'Invalid stock adjustment.');
+        if (p.onHand + body.delta < 0) fail(409, 'The adjustment would take stock below zero.');
+        if (p.onHand + body.delta > 2147483647) fail(409, 'The adjustment would exceed the stock limit.');
+        p.onHand += body.delta;
+        movements.push({ id: `movement_${++seq}`, productId: p.productId, delta: body.delta, kind: 'ADMIN_ADJUST', reason: body.reason.trim(), orderId: null, adminName: admin.name, createdAt: new Date().toISOString() });
+        addAudit(admin.email, 'inventory.adjust', 'product', p.productId, { delta: body.delta, onHandAfter: p.onHand, reasonLength: body.reason.trim().length }, req);
+        return json(res, 200, stockItem(p));
+      }
+      if (method === 'POST' && m[2] === 'threshold') {
+        const n = body.lowStockThreshold;
+        if (Object.keys(body).some((k) => k !== 'lowStockThreshold') || (n !== null && (!Number.isInteger(n) || n < 0 || n > 2147483647))) fail(400, 'lowStockThreshold must be a whole number >= 0 or null.');
+        const from = p.lowStockThreshold; p.lowStockThreshold = n;
+        addAudit(admin.email, 'inventory.threshold', 'product', p.productId, { from, to: n }, req);
+        return json(res, 200, stockItem(p));
+      }
+    }
+  }
+  if ((m = /^\/admin\/orders\/([^/]+)\/refund(?:\/(submit|verify))?$/.exec(route)) && method === 'POST') {
+    owner();
+    const o = orders.find((r) => r.id === m[1]);
+    if (!o) fail(404, 'Order not found.');
+    const action = m[2] ?? 'request';
+    if (action !== 'request' && Object.keys(body).length) fail(400, 'This endpoint accepts no body.');
+    if (action === 'submit' && !config.signerAvailable) fail(503, 'Refund signing is not available.');
+    if (action !== 'verify') {
+      if (['SHIPPED', 'DELIVERED'].includes(o.status)) fail(409, 'Shipped orders cannot be refunded here.');
+      if (!['PAID', 'PROCESSING'].includes(o.status)) fail(409, `Order is ${o.status}; cannot refund.`);
+    }
+    if (action === 'request') {
+      if (Object.keys(body).some((k) => k !== 'reason')) fail(400, 'Only "reason" is accepted: the refund amount and destination are decided by the server.');
+      if (typeof body.reason !== 'string' || !body.reason.trim() || body.reason.trim().length > 500) fail(400, 'reason must be 1-500 characters.');
+      if (o.refund && o.refund.status !== 'FAILED') fail(409, 'A refund is already in progress for this order.');
+      const forced = conflictMessage('refundRequest', "The customer's linked wallet is not the wallet that paid; the refund needs manual review.");
+      if (forced) fail(409, forced);
+      o.refund = { id: `refund_${++seq}`, status: 'REQUESTED', amountAtomic: String(o.totalCents * 10000), txSignature: null, requestedAt: new Date().toISOString(), failureReason: null };
+    } else {
+      if (!o.refund || (action === 'submit' && o.refund.status === 'FAILED')) fail(409, 'No refund has been requested for this order.');
+      if (action === 'submit') {
+        if (o.refund.status !== 'REQUESTED') return json(res, 200, detail(o));
+        o.refund.status = 'SUBMITTED'; o.refund.txSignature = sig(++seq);
+      } else {
+        if (config.refundVerifyError) fail(503, 'RPC unavailable internal text');
+        if (o.refund.status === 'SUBMITTED') {
+          const n = (refundChecks.get(o.refund.id) ?? 0) + 1; refundChecks.set(o.refund.id, n);
+          if (n >= config.refundChecks && config.refundOutcome !== 'stuck') {
+            o.refund.status = config.refundOutcome === 'fail' ? 'FAILED' : 'FINALIZED';
+            if (o.refund.status === 'FAILED') o.refund.failureReason = 'Refund transaction failed on chain.';
+            else {
+              transition(o, 'REFUNDED', null);
+              if (!released.has(o.id)) { released.add(o.id); for (const it of o.items) { const p = stock.find((r) => r.productId === it.productId); if (p && o.subtotalCents !== null) { p.onHand += it.quantity; movements.push({ id: `movement_${++seq}`, productId: p.productId, delta: it.quantity, kind: 'ORDER_RELEASE', reason: 'Order refunded', orderId: o.id, adminName: null, createdAt: new Date().toISOString() }); } } }
+            }
+          } else return json(res, 200, detail(o));
+        } else return json(res, 200, detail(o));
+      }
+    }
+    addAudit(admin.email, `order.refund.${action}`, 'order', o.id, { refundId: o.refund.id, amountAtomic: o.refund.amountAtomic, outcome: o.refund.status }, req);
+    return json(res, 200, detail(o));
+  }
+  if (route === '/admin/compliance/sanctions' && method === 'GET') return json(res, 200, sanctions);
+  if (route === '/admin/compliance/sanctions/refresh' && method === 'POST') {
+    owner();
+    if (Object.keys(body).some((k) => k !== 'force') || ('force' in body && typeof body.force !== 'boolean')) fail(400, 'force must be a boolean.');
+    let error = config.sanctionsOutcome === 'fail' ? 'The list source answered HTTP 503.' : config.sanctionsOutcome === 'busy' ? 'A refresh is already running.' : config.sanctionsOutcome === 'empty' ? 'The downloaded list holds no digital currency addresses; the previous data was kept.' : config.sanctionsOutcome === 'shrink' && !body.force ? `The downloaded list shrank implausibly (400 addresses, previously ${sanctions.addressCount}); the previous data was kept.` : null;
+    if (config.sanctionsOutcome !== 'busy') sanctions.lastRun = { fetchedAt: new Date().toISOString(), entryCount: error ? 0 : config.sanctionsOutcome === 'shrink' ? 400 : 1051, status: error ? 'FAILED' : 'OK', error };
+    if (!error) sanctions.addressCount = sanctions.lastRun.entryCount;
+    addAudit(admin.email, 'sanctions.refresh', 'sanctions', null, { outcome: error ? 'FAILED' : 'OK', entryCount: sanctions.lastRun?.entryCount ?? null, force: body.force === true, reason: error }, req);
+    if (error) fail(503, error);
+    return json(res, 200, sanctions);
+  }
+  if (route.startsWith('/admin/email/outbox')) {
+    owner();
+    if (config.failEmail) fail(503, 'Internal provider details must not appear.');
+    if (route === '/admin/email/outbox' && method === 'GET') {
+      const status = url.searchParams.get('status');
+      if (status && !['PENDING', 'SENDING', 'SENT', 'FAILED'].includes(status)) fail(400, 'Invalid status.');
+      return json(res, 200, opPage(outbox.filter((r) => !status || r.status === status), url, 'email', 50));
+    }
+    if ((m = /^\/admin\/email\/outbox\/([^/]+)\/retry$/.exec(route)) && method === 'POST') {
+      const row = outbox.find((r) => r.id === m[1]);
+      if (!row) fail(404, 'Email not found.');
+      if (row.status !== 'FAILED') fail(409, 'Only failed emails can be retried.');
+      Object.assign(row, { status: 'PENDING', attempts: 0, lastError: null });
+      addAudit(admin.email, 'email.retry', 'email_outbox', row.id, { template: row.template }, req);
+      return json(res, 200, row);
+    }
+  }
+  fail(404, 'Not found.');
+}
+
 reset();
 
 // ---------------------------------------------------------------- helpers
@@ -454,10 +599,12 @@ const userRow = (a) => ({ id: a.id, email: a.email, name: a.name, role: a.role, 
 
 function allowedActions(order) {
   const map = { PENDING_PAYMENT: ['cancel'], PAID: ['start-packing'], PROCESSING: ['ship'], SHIPPED: ['mark-delivered'], DELIVERED: [], CANCELLED: [], REFUNDED: [] };
-  return [...map[order.status], 'add-note'];
+  const refundable = ['PAID', 'PROCESSING'].includes(order.status) && (!order.refund || order.refund.status === 'FAILED');
+  // Like the actual backend, allowedActions still includes pack/ship when SUBMITTED; the UI also checks refund.status.
+  return [...map[order.status], ...(refundable ? ['refund'] : []), 'add-note'];
 }
-const detail = (o) => ({ ...o, allowedActions: allowedActions(o) });
-const summary = (o) => ({ id: o.id, status: o.status, totalCents: o.totalCents, currency: o.currency, createdAt: o.createdAt, customer: o.customer, itemCount: o.itemCount, hasShipment: o.hasShipment, trackingNumber: o.trackingNumber });
+const detail = (o) => { const { actionsOverride, ...row } = o; return { ...row, allowedActions: actionsOverride ?? allowedActions(o) }; };
+const summary = (o) => ({ id: o.id, status: o.status, totalCents: o.totalCents, subtotalCents: o.subtotalCents, shippingCents: o.shippingCents, taxCents: o.taxCents, currency: o.currency, createdAt: o.createdAt, customer: o.customer, itemCount: o.itemCount, hasShipment: o.hasShipment, trackingNumber: o.trackingNumber });
 
 function transition(order, to, admin, note = null) {
   order.events.push({ id: `${order.id}_e${order.events.length}_${++seq}`, kind: 'STATUS', fromStatus: order.status, toStatus: to, note, adminName: admin?.name ?? null, createdAt: new Date().toISOString() });
@@ -486,6 +633,24 @@ async function handle(req, res) {
     if (path === '/__control/reset') { reset(); return json(res, 200, { ok: true }); }
     if (path === '/__control/expire-sessions') { for (const t of tokens.values()) t.expired = true; return json(res, 200, { ok: true, expired: tokens.size }); }
     if (path === '/__control/config') { Object.assign(config, body); return json(res, 200, config); }
+    if (path === '/__control/ops-state') return json(res, 200, { stock: stock.map(stockItem), movements, sanctions, outbox, audit, refundChecks: Object.fromEntries(refundChecks) });
+    if (path === '/__control/ops-seed') { buildOperations(); return json(res, 200, { ok: true }); }
+    if (path === '/__control/stock') { Object.assign(stock.find((p) => p.productId === body.productId), body); return json(res, 200, { ok: true }); }
+    if (path === '/__control/bulk-inventory') {
+      for (let i = 0; i < (body.n ?? 35); i++) stock.push({ productId: `stock_bulk_${i}`, sku: `Z-QA-${String(i).padStart(3, '0')}`, name: `Inventory QA ${i}`, active: true, onHand: 10, reserved: 2, lowStockThreshold: null });
+      for (let i = 0; i < 55; i++) movements.push({ id: `movement_bulk_${i}`, productId: 'prd_bpc157', delta: 1, kind: 'ADMIN_ADJUST', reason: `Historical count ${i}`, orderId: null, adminName: 'Sam Staff', createdAt: ago(10000 + i) });
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/__control/refund-state') {
+      const order = orders.find((o) => o.id === body.id);
+      if (body.orderStatus) order.status = body.orderStatus;
+      if ('network' in body) order.payment.network = body.network;
+      if ('allowedActions' in body) order.actionsOverride = body.allowedActions;
+      order.refund = body.status ? { id: `refund_${++seq}`, status: body.status, amountAtomic: String(order.totalCents * 10000), txSignature: body.signature ?? (body.status === 'REQUESTED' ? null : sig(seq)), requestedAt: new Date().toISOString(), failureReason: body.failureReason ?? null } : null;
+      return json(res, 200, detail(order));
+    }
+    if (path === '/__control/sanctions-state') { sanctions = body; return json(res, 200, sanctions); }
+    if (path === '/__control/email-state') { Object.assign(outbox.find((r) => r.id === body.id), body); return json(res, 200, { ok: true }); }
     if (path === '/__control/bulk') { bulk(Number(body.n) || 40); return json(res, 200, { ok: true, total: orders.length }); }
     if (path === '/__control/coa-state') {
       return json(res, 200, {
@@ -519,7 +684,7 @@ async function handle(req, res) {
     return json(res, 404, { message: 'unknown control endpoint' });
   }
 
-  const finish = (status, authKind) => requestLog.push({ method, path: path + url.search, status, auth: authKind, at: new Date().toISOString() });
+  const finish = (status, authKind) => requestLog.push({ method, path: path + url.search, status, auth: authKind, at: new Date().toISOString(), ...(req.opsBody ? { body: req.opsBody } : {}) });
   const authKind = req.headers.authorization ? 'bearer' : req.headers['x-admin-token'] ? 'x-admin-token' : 'none';
   res.on('finish', () => finish(res.statusCode, authKind));
 
@@ -604,6 +769,10 @@ async function handle(req, res) {
   }
 
   // ---- orders
+  if (/^\/admin\/(inventory|compliance|email)(\/|$)/.test(route) || /^\/admin\/orders\/[^/]+\/refund(?:\/|$)/.test(route)) {
+    await handleOperations(route, method, req, res, url, admin);
+    return;
+  }
   if (route.startsWith('/admin/orders')) {
     if (config.failOrders) return json(res, 500, { message: 'TypeError: Cannot read properties of undefined\n    at OrdersService.list (/srv/api/dist/orders.js:41:13)' });
     if (route === '/admin/orders/counts' && method === 'GET') {
@@ -636,6 +805,7 @@ async function handle(req, res) {
           return json(res, 200, detail(order));
         }
         if (!need[a]) return json(res, 404, { message: 'Unknown action.' });
+        if (['start-packing', 'ship'].includes(a) && order.refund?.status === 'SUBMITTED') return json(res, 409, { message: 'A refund is in progress for this order.' });
         if (order.status !== need[a]) return json(res, 409, { message: `Order is ${order.status}; ${a} requires ${need[a]}.` });
         if (a === 'ship') {
           if (!['USPS', 'UPS', 'FedEx', 'DHL', 'OTHER'].includes(body.carrier)) return json(res, 400, { message: 'carrier must be one of USPS, UPS, FedEx, DHL, OTHER.' });
@@ -665,7 +835,7 @@ async function handle(req, res) {
 
 http.createServer((req, res) => {
   handle(req, res).catch((error) => {
-    console.error('fake api error:', error.message);
-    if (!res.headersSent) json(res, 500, { message: 'fake api failure' });
+    if (!error.status) console.error('fake api error:', error.message);
+    if (!res.headersSent) json(res, error.status ?? 500, { message: error.status ? error.message : 'fake api failure' });
   });
 }).listen(PORT, '127.0.0.1', () => console.log(`fake admin API listening on http://127.0.0.1:${PORT}/v1`));

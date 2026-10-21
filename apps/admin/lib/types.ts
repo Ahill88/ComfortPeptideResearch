@@ -13,6 +13,9 @@ export interface AdminOrderSummary {
   id: string;
   status: OrderStatus;
   totalCents: number;
+  subtotalCents: number | null;
+  shippingCents: number;
+  taxCents: number;
   currency: string;
   createdAt: string;
   customer: { id: string; email: string; name: string | null };
@@ -21,7 +24,12 @@ export interface AdminOrderSummary {
   trackingNumber: string | null;
 }
 
-export type OrderAction = 'start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'add-note';
+export type OrderAction = 'start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'refund' | 'add-note';
+
+export interface AdminOrderRefund {
+  id: string; status: 'REQUESTED' | 'SUBMITTED' | 'FINALIZED' | 'FAILED'; amountAtomic: string;
+  txSignature: string | null; requestedAt: string; failureReason: string | null;
+}
 
 export interface AdminOrderDetail extends AdminOrderSummary {
   shippingAddress: string | null;
@@ -30,6 +38,7 @@ export interface AdminOrderDetail extends AdminOrderSummary {
   shipments: Array<{ id: string; carrier: string; trackingNumber: string; shippedAt: string; deliveredAt: string | null; note: string | null }>;
   events: Array<{ id: string; kind: 'STATUS' | 'NOTE'; fromStatus: OrderStatus | null; toStatus: OrderStatus | null; note: string | null; adminName: string | null; createdAt: string }>;
   allowedActions: OrderAction[];
+  refund: AdminOrderRefund | null;
 }
 
 export const CARRIERS = ['USPS', 'UPS', 'FedEx', 'DHL', 'OTHER'] as const;
@@ -82,3 +91,24 @@ export interface AdminCoa {
 }
 
 export interface AdminLotDetail { lot: AdminLotSummary; coas: AdminCoa[] }
+
+export interface Page<T> { items: T[]; nextCursor: string | null }
+export interface InventoryItem {
+  productId: string; sku: string; name: string; active: boolean;
+  /** Already sellable: unpaid reservations have been deducted. */
+  onHand: number; reserved: number; lowStockThreshold: number | null; lowStock: boolean;
+}
+export interface InventoryMovement {
+  id: string; delta: number; kind: string; reason: string | null; orderId: string | null;
+  adminName: string | null; createdAt: string;
+}
+export interface SanctionsStatus {
+  source: string; addressCount: number;
+  lastRun: { fetchedAt: string; entryCount: number; status: string; error: string | null } | null;
+}
+export const EMAIL_STATUSES = ['PENDING', 'SENDING', 'SENT', 'FAILED'] as const;
+export type EmailStatus = (typeof EMAIL_STATUSES)[number];
+export interface EmailOutboxItem {
+  id: string; toDomain: string; template: string; status: EmailStatus; attempts: number;
+  lastError: string | null; createdAt: string; sentAt: string | null;
+}

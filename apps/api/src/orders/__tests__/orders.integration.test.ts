@@ -72,10 +72,10 @@ before(async () => {
   await app.listen(0, '127.0.0.1');
   base = (await app.getUrl()).replace('[::1]', '127.0.0.1');
 
-  product = await prisma.product.create({ data: { sku: `SKU-${tag}`, slug: `slug-${tag}`, name: 'idem', active: true, priceCents: 1250, inventory: 10 } });
+  product = await prisma.product.create({ data: { sku: `SKU-${tag}`, slug: `slug-${tag}`, name: 'idem', active: true, priceCents: 1250, inventory: 1_000_000 } });
   lotCode = `LOT-${tag}`;
   await prisma.lot.create({ data: { code: lotCode, productId: product.id, coaKey: 'coa/test.pdf', purity: 99 } });
-  expensive = await prisma.product.create({ data: { sku: `SKU-X-${tag}`, slug: `slug-x-${tag}`, name: 'pricey', active: true, priceCents: 2_000_000_000, inventory: 1 } });
+  expensive = await prisma.product.create({ data: { sku: `SKU-X-${tag}`, slug: `slug-x-${tag}`, name: 'pricey', active: true, priceCents: 2_000_000_000, inventory: 1_000 } });
   expensiveLot = `LOT-X-${tag}`;
   await prisma.lot.create({ data: { code: expensiveLot, productId: expensive.id, coaKey: 'coa/test.pdf', purity: 99 } });
 });
@@ -84,6 +84,7 @@ after(async () => {
   try {
     const customers = await prisma.customer.findMany({ where: { email: { in: emails } }, select: { id: true } });
     const ids = customers.map((customer) => customer.id);
+    await prisma.inventoryAdjustment.deleteMany({ where: { productId: { in: [product?.id, expensive?.id].filter(Boolean) as string[] } } });
     await prisma.orderItem.deleteMany({ where: { order: { customerId: { in: ids } } } });
     await prisma.order.deleteMany({ where: { customerId: { in: ids } } });
     await prisma.customer.deleteMany({ where: { id: { in: ids } } });

@@ -66,7 +66,7 @@ test('HSTS is added when the runtime is production-like', async () => {
   }
 });
 
-test('CORS: allowlisted origin is echoed (never *), no credentials, explicit methods and headers', async () => {
+test('CORS: allowlisted origin is echoed (never *), credentials allowed for it, explicit methods and headers', async () => {
   const { app, base } = await boot(dev);
   try {
     const preflight = await fetch(`${base}/v1/wallet/transfers/prepare`, {
@@ -75,7 +75,8 @@ test('CORS: allowlisted origin is echoed (never *), no credentials, explicit met
     });
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get('access-control-allow-origin'), 'https://shop.example.com');
-    assert.equal(preflight.headers.get('access-control-allow-credentials'), null);
+    assert.equal(preflight.headers.get('access-control-allow-credentials'), 'true');
+    assert.notEqual(preflight.headers.get('access-control-allow-origin'), '*');
     const allowHeaders = (preflight.headers.get('access-control-allow-headers') ?? '').toLowerCase();
     for (const header of ['content-type', 'idempotency-key', 'x-customer-email']) assert.ok(allowHeaders.includes(header), header);
     assert.ok(!allowHeaders.includes('x-admin-token'));
@@ -86,6 +87,7 @@ test('CORS: allowlisted origin is echoed (never *), no credentials, explicit met
 
     const actual = await fetch(`${base}/v1/ping`, { headers: { Origin: 'http://localhost:3000' } });
     assert.equal(actual.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+    assert.equal(actual.headers.get('access-control-allow-credentials'), 'true');
   } finally {
     await app.close();
   }
@@ -97,6 +99,7 @@ test('CORS: origins outside the allowlist (including look-alikes and null) get n
     for (const origin of ['https://evil.example', 'https://shop.example.com.evil.example', 'http://shop.example.com', 'http://localhost:3001', 'null']) {
       const res = await fetch(`${base}/v1/ping`, { headers: { Origin: origin } });
       assert.equal(res.headers.get('access-control-allow-origin'), null, origin);
+      // The cors middleware may still emit Allow-Credentials, but without Allow-Origin a browser rejects the response, so it is inert.
     }
   } finally {
     await app.close();
@@ -108,6 +111,7 @@ test('CORS: with STOREFRONT_ORIGIN unset no origin is allowed', async () => {
   try {
     const res = await fetch(`${base}/v1/ping`, { headers: { Origin: 'http://localhost:3000' } });
     assert.equal(res.headers.get('access-control-allow-origin'), null);
+    assert.equal(res.headers.get('access-control-allow-credentials'), null);
   } finally {
     await app.close();
   }

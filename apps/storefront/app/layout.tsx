@@ -7,7 +7,7 @@ import { Footer } from '../components/footer';
 import { CartProvider } from '../components/cart-provider';
 import { AuthProvider } from '../components/auth-provider';
 
-export const metadata: Metadata = { title: 'Helix & Field | Research Materials', description: 'Research materials, considered information, and a clearer path to laboratory inquiry.' };
+export const metadata: Metadata = { title: 'Helix & Field | Research Peptides & Materials', description: 'High-purity research peptides and materials with verified documentation. Lot-specific COAs, CAS-verified products, and consistent quality for laboratory research.' };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return <html lang="en" className={`${GeistSans.variable} ${GeistMono.variable}`}>

@@ -15,9 +15,12 @@ import { createTransferCheckedInstruction, getAssociatedTokenAddressSync } from 
 import { randomBytes } from 'node:crypto';
 import { PrismaService } from '../../prisma.service';
 import { requireApprovedEligibility } from '../../compliance/eligibility.gate';
+import { type ComplianceScreen, refuseIfSanctioned } from '../transfers/compliance-screen';
+import { COMPLIANCE_SCREEN } from '../wallet.tokens';
 import { isNonProductionRuntime } from '../../config/runtime';
 import { ChainRejectedError } from '../chain/chain-errors';
-import { ChainUnavailableError, USDC_DECIMALS, USDC_DEVNET_MINT, centsToAtomic } from '../contracts';
+import { usdcMintOf } from '../chain/chain.types';
+import { ChainUnavailableError, USDC_DECIMALS, centsToAtomic } from '../contracts';
 import {
   BALANCE_PORT,
   CHAIN_PORT,
@@ -26,6 +29,8 @@ import {
   WALLET_FLAGS,
   WALLET_LOOKUP_PORT,
   FEE_PAYER_SIGNER,
+  CHAIN_READINESS_PORT,
+  type ChainReadinessPort,
   type BalancePort,
   type ChainPort,
   type CheckoutConfig,
@@ -118,6 +123,10 @@ export class CheckoutService {
      * unavailable and the customer pays the fee. Only a sandbox-only in-memory signer ships in this repository.
      */
     @Optional() @Inject(FEE_PAYER_SIGNER) private readonly feePayerSigner: FeePayerSigner | undefined = undefined,
+    /** Optional: the boot-time chain preflight. Unbound (unit tests) means no preflight; bound and not ready means payments are refused with 503. */
+    @Optional() @Inject(CHAIN_READINESS_PORT) private readonly readiness: ChainReadinessPort | undefined = undefined,
+    /** Sanctions screen (COMPLIANCE_SCREEN). DI always supplies it; hand-built unit-test instances may omit it. */
+    @Optional() @Inject(COMPLIANCE_SCREEN) private readonly screen: ComplianceScreen | undefined = undefined,
   ) {
     const eligibility = resolveEligibilityRequired({ ELIGIBILITY_REQUIRED: process.env.ELIGIBILITY_REQUIRED, NODE_ENV: process.env.NODE_ENV });
     this.eligibilityRequired = eligibility.required;
@@ -137,6 +146,24 @@ export class CheckoutService {
   private async assertEligible(customerId: string): Promise<void> {
     if (!this.eligibilityRequired) return;
     await requireApprovedEligibility(this.prisma, customerId);
+  }
+
+  /**
+   * Mainnet moves real funds: it needs BOTH ENABLE_SOLANA_MAINNET and ENABLE_LIVE_CRYPTO_PAYMENTS ("live" == mainnet; devnet/sandbox
+   * need neither), and the boot-time chain preflight must have passed when one is bound. Runs on prepare AND submit.
+   */
+  private assertPaymentsAllowed(): void {
+    const network = this.chain.network;
+    if (network === 'solana-mainnet') {
+      if (!this.flags.enableSolanaMainnet) throw new ConflictException('Solana mainnet is disabled');
+      if (!this.flags.enableLiveCryptoPayments) throw new ConflictException('Live crypto payments are disabled');
+    } else if (network !== 'solana-devnet') {
+      throw new ConflictException('Unsupported Solana network');
+    }
+    if (this.readiness && !this.readiness.isReady()) {
+      this.logger.error(`Payments refused: chain preflight has not passed (${this.readiness.reason()})`);
+      throw new ServiceUnavailableException('Payments are temporarily unavailable: the Solana network check has not passed');
+    }
   }
 
   /** Resolves a customer id from an email (used by the controller's dev identity header). */
@@ -172,20 +199,24 @@ export class CheckoutService {
     }
 
     const network = this.chain.network;
-    const flags = this.flags;
-    if (network === 'solana-mainnet') {
-      if (!flags.enableSolanaMainnet) throw new ConflictException('Solana mainnet is disabled');
-      // "Live" == mainnet. Devnet/sandbox does not require enableLiveCryptoPayments.
-      if (!flags.enableLiveCryptoPayments) throw new ConflictException('Live crypto payments are disabled');
-    } else if (network !== 'solana-devnet') {
-      throw new ConflictException('Unsupported Solana network');
+    this.assertPaymentsAllowed();
+    // THE one mint source: the chain's (env SOLANA_USDC_MINT). No per-network switch here; on mainnet a chain without one throws.
+    let mint: string | undefined;
+    try {
+      mint = usdcMintOf(this.chain);
+    } catch {
+      mint = undefined;
     }
-    const mint = network === 'solana-devnet' ? USDC_DEVNET_MINT : this.config.mainnetUsdcMint;
     if (!mint || !isValidPublicKey(mint)) throw new ConflictException('USDC mint is not configured for this network');
 
     const wallet = await this.wallets.getWallet(customerId);
     if (!wallet || !isValidPublicKey(wallet.address)) throw new ConflictException('Customer has no valid wallet');
     if (wallet.network && wallet.network !== network) throw new ConflictException('Customer wallet network does not match the chain');
+    // Sanctions screening of the paying wallet (before any reservation or message is created).
+    if (this.screen) {
+      const verdict = await this.screen.screen({ customerId, sourceAddress: wallet.address, destinationAddress: wallet.address, amountAtomic: 0n, mint, surface: 'checkout' });
+      await refuseIfSanctioned(verdict, 'checkout', (action, detail) => this.prisma.walletAuditEvent.create({ data: { customerId, action, detail: detail as never } }));
+    }
 
     const merchant = this.config.treasury;
     if (!merchant || !isValidPublicKey(merchant)) throw new ServiceUnavailableException('Merchant treasury is not configured');
@@ -514,6 +545,7 @@ export class CheckoutService {
   async submit(customerId: string, orderId: string, signedTransactionBase64: string): Promise<SubmitResult> {
     // Approval may have been revoked since prepare: re-check before anything is decoded, claimed or broadcast.
     await this.assertEligible(customerId);
+    this.assertPaymentsAllowed();
     if (
       typeof signedTransactionBase64 !== 'string' ||
       signedTransactionBase64.length === 0 ||

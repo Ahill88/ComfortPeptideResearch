@@ -8,13 +8,15 @@ import { CopyButton } from '../console/copy-button';
 import { atomicToUsdc, explorerUrl, formatMoney, shortId, statusLabel } from '../console/format';
 import { LocalTime } from '../console/local-time';
 import { StatusChip } from '../console/status-chip';
+import { OrderTotals } from './order-totals';
+import { RefundPanel } from './refund-panel';
 
 type Mode = 'idle' | 'ship' | 'ship-confirm' | 'cancel';
 interface Message { kind: 'ok' | 'error'; text: string }
 
 const TRACKING = /^[A-Za-z0-9-]{6,40}$/;
 
-export function OrderDetail({ initial }: { initial: AdminOrderDetail }) {
+export function OrderDetail({ initial, isOwner }: { initial: AdminOrderDetail; isOwner: boolean }) {
   const [order, setOrder] = useState(initial);
   const [mode, setMode] = useState<Mode>('idle');
   const [pending, setPending] = useState(false);
@@ -31,7 +33,7 @@ export function OrderDetail({ initial }: { initial: AdminOrderDetail }) {
   const [noteText, setNoteText] = useState('');
   const [noteError, setNoteError] = useState('');
 
-  const allowed = useMemo(() => new Set<OrderAction>(order.allowedActions), [order.allowedActions]);
+  const allowed = useMemo(() => new Set<OrderAction>(order.allowedActions.filter((a) => order.refund?.status !== 'SUBMITTED' || (a !== 'ship' && a !== 'start-packing'))), [order.allowedActions, order.refund?.status]);
   const events = useMemo(() => [...order.events].sort((a, b) => a.createdAt.localeCompare(b.createdAt)), [order.events]);
   const normalisedTracking = tracking.replace(/\s+/g, '');
   const total = formatMoney(order.totalCents, order.currency);
@@ -151,6 +153,7 @@ export function OrderDetail({ initial }: { initial: AdminOrderDetail }) {
             </div>
           </section>
 
+          <OrderTotals order={order} />
           <section className="panel" aria-labelledby="payment-h">
             <h2 id="payment-h">Payment</h2>
             {!payment ? (
@@ -211,6 +214,7 @@ export function OrderDetail({ initial }: { initial: AdminOrderDetail }) {
         </div>
 
         <aside className="detail-side" aria-label="Customer and actions">
+          <RefundPanel order={order} isOwner={isOwner} pending={pending} lock={lock} setPending={setPending} onOrder={setOrder} />
           <section className="panel" aria-labelledby="actions-h">
             <h2 id="actions-h">Actions</h2>
             <div aria-live="polite" aria-atomic="true" role="status">

@@ -32,7 +32,8 @@ test('order id is server-generated and never the client idempotency key', async 
 test('response keeps the OrderResponse shape and exposes no idempotency bookkeeping', async () => {
   const { service } = setup();
   const order = await service.create(request());
-  assert.deepEqual(Object.keys(order).sort(), ['createdAt', 'currency', 'customerId', 'id', 'items', 'researchAcknowledgedAt', 'status', 'totalCents']);
+  assert.deepEqual(Object.keys(order).sort(), ['createdAt', 'currency', 'customerId', 'id', 'items', 'researchAcknowledgedAt', 'shippingCents', 'status', 'subtotalCents', 'taxCents', 'totalCents']);
+  assert.ok(!('shippingAddress' in order) && !('expiresAt' in order));
   assert.ok(!('requestHash' in order) && !('idempotencyKey' in order));
   assert.deepEqual(Object.keys(order.items[0]).sort(), ['id', 'lotCode', 'orderId', 'productId', 'quantity', 'unitCents']);
 });

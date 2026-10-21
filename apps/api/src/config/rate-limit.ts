@@ -77,17 +77,24 @@ export function routeSegments(rawPath: string | undefined): string[] {
   return segments;
 }
 
+/** /auth/<these> count against the default bucket only (see selectRateLimitBucket). Everything else under /auth is strict. */
+const CUSTOMER_AUTH_DEFAULT_BUCKET_ROUTES = new Set(['session', 'profile', 'addresses', 'logout', 'mfa/enroll']);
+
 /**
  * Which strict bucket (if any) a request path belongs to. HTTP method is deliberately ignored so a verb
  * switch cannot dodge the limit.
  *   money: wallet/transfers/**, wallet/checkout/:orderId/submit, wallet/onramp/**
- *   auth : auth/**, admin/auth/login, admin/auth/change-password
- *   public: public/** (COA verification; replaces the default bucket for these routes, see the file header)
+ *   auth : auth/** (except session, profile, addresses, logout, mfa/enroll[/confirm]), admin/auth/login, admin/auth/change-password
+ *   public: public/** (COA verification) and orders/quote (cart price preview); replaces the default bucket for these routes, see the file header
  */
 export function selectRateLimitBucket(rawPath: string | undefined): StrictBucketName | null {
   const [a, b, c, d, ...rest] = routeSegments(rawPath);
-  if (a === 'auth') return 'auth';
+  // Customer accounts: every route is strict (register, login, password-reset/*, email-verification/*, mfa/disable, anything new)
+  // EXCEPT the already-authenticated, non-credential ones, so a page-load session check cannot exhaust the 20/min login budget.
+  if (a === 'auth') return CUSTOMER_AUTH_DEFAULT_BUCKET_ROUTES.has([b, b === 'mfa' ? c : undefined].filter(Boolean).join('/')) ? null : 'auth';
   if (a === 'public') return 'public';
+  // Cart price preview: anonymous, read-only (writes and reserves nothing), so it uses the generous public bucket instead of the shared default one.
+  if (a === 'orders' && b === 'quote' && c === undefined) return 'public';
   // Back-office sign-in and password change: guessable credentials, same strict per-IP bucket as customer auth.
   if (a === 'admin' && b === 'auth' && (c === 'login' || c === 'change-password')) return 'auth';
   if (a === 'wallet') {

@@ -20,10 +20,12 @@ test('parseCorsOrigins rejects wildcards, null, paths, credentials, non-http sch
   }
 });
 
-test('buildCorsOptions: explicit allowlist, explicit methods/headers, no wildcard, credentials false', () => {
+test('buildCorsOptions: explicit allowlist, explicit methods/headers, no wildcard, credentials true (cookie sessions)', () => {
   const cors = buildCorsOptions({ STOREFRONT_ORIGIN: 'http://localhost:3000,https://shop.example.com' });
   assert.deepEqual(cors.origin, ['http://localhost:3000', 'https://shop.example.com']);
-  assert.equal(cors.credentials, false);
+  // Cookie sessions: credentials are allowed, but only because the origin list is exact (an `Access-Control-Allow-Origin: *` with credentials would be refused by browsers and is never produced).
+  assert.equal(cors.credentials, true);
+  assert.ok(Array.isArray(cors.origin) && cors.origin.every((origin) => origin !== '*'));
   assert.ok(!JSON.stringify(cors).includes('*'));
   for (const header of ['Content-Type', 'Idempotency-Key', 'x-customer-email']) assert.ok(cors.allowedHeaders.map((h) => h.toLowerCase()).includes(header.toLowerCase()), header);
   assert.ok(!CORS_ALLOWED_HEADERS.map((h) => h.toLowerCase()).includes('x-admin-token'));

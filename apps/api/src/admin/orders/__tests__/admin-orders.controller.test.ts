@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, before, test } from 'node:test';
 import { type CanActivate, type ExecutionContext, type INestApplication, UnauthorizedException, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { INVENTORY_PORT } from '../../../commerce/inventory.types';
 import { PrismaService } from '../../../prisma.service';
 import { AdminAuditService } from '../../admin-audit.service';
 import { AdminSessionGuard } from '../../admin-session.guard';
@@ -35,7 +36,7 @@ async function call(method: string, path: string, body?: unknown, auth = true) {
 before(async () => {
   const moduleRef = await Test.createTestingModule({
     controllers: [AdminOrdersController],
-    providers: [AdminOrdersService, { provide: PrismaService, useValue: double.prisma }, { provide: AdminAuditService, useValue: double.audit }],
+    providers: [AdminOrdersService, { provide: PrismaService, useValue: double.prisma }, { provide: AdminAuditService, useValue: double.audit }, { provide: INVENTORY_PORT, useValue: { releaseForOrder: async () => undefined } }],
   })
     .overrideGuard(AdminSessionGuard)
     .useClass(TestGuard)

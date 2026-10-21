@@ -129,6 +129,91 @@ test('custody: the COA publisher signing allowance is one port helper, a memo-on
   for (const f of anchorFiles) assert.doesNotMatch(stripComments(read(f)), /secret|Keypair|createPrivateKey|generateKeyPair/i, `${rel(f)} must not reference key material`);
 });
 
+/*
+ * THIRD, EQUALLY NARROW ALLOWANCE (merchant refunds): the platform ASKS an external MerchantSigner to sign a treasury -> customer refund
+ * transfer; it never signs itself. The one call site is `signer['signTransaction'](...)` inside requestMerchantSignature() in
+ * refunds.service.ts (bracket access on purpose: the generic scan above stays untouched and keeps forbidding every `.signTransaction(`).
+ * The generic rules are NOT loosened for it. The test below pins WHY it is safe and that nothing else may sign, hold or bind a key:
+ *   - what it signs is built by the service from the order's finalized purchase (destination = the wallet that paid, amount = the stored
+ *     refund), the signer's reported treasury must equal the treasury that received the payment, and the returned transaction is
+ *     re-verified byte for byte against the prepared message before anything is broadcast;
+ *   - apps/api/src ships NO MerchantSigner implementation and binds MERCHANT_SIGNER only to `undefined` (production = KMS/HSM, submit is 503);
+ *   - the only key-holding binding lives in tools/dev (dev launcher + live proof), devnet only, behind DEV_TREASURY_KEYPAIR_FILE.
+ */
+const REFUNDS_SERVICE_FILE = 'apps/api/src/wallet/refunds/refunds.service.ts';
+const MERCHANT_PORT_FILE = 'apps/api/src/wallet/refunds/merchant-signer.port.ts';
+const REFUNDS_MODULE_FILE = 'apps/api/src/wallet/refunds/refunds.module.ts';
+const DEV_LAUNCHER_FILE = 'tools/dev/api-devnet-sponsored.ts';
+const DEV_TREASURY_SIGNER_FILE = 'tools/dev/dev-treasury-signer.ts';
+
+test('custody: the merchant refund signing allowance is one delegated call in the refunds service, verified on both sides, with no key material and no implementation in apps/api/src', () => {
+  const files = API_FILES();
+  // 1. No implementation of the port and no binding other than "unbound" anywhere in the API source.
+  const implementing = files.filter((f) => /\bimplements\s+MerchantSigner\b/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(implementing, [], `no MerchantSigner implementation may ship in apps/api/src; found: ${implementing.join(', ')}`);
+  const binding = files.filter((f) => /provide:\s*MERCHANT_SIGNER\b/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(binding, [REFUNDS_MODULE_FILE], 'only the refunds module may bind MERCHANT_SIGNER, and only to undefined');
+  const moduleSrc = stripComments(read(path.join(ROOT, REFUNDS_MODULE_FILE)));
+  assert.match(moduleSrc, /provide:\s*MERCHANT_SIGNER,\s*useFactory:\s*\(\)\s*:\s*MerchantSigner\s*\|\s*undefined\s*=>\s*undefined\s*\}/, 'the default MERCHANT_SIGNER binding must be undefined (no key in the repo)');
+  // 2. Exactly one signing request in the whole API source: the bracketed call in the refunds service.
+  const calls = files.filter((f) => /\[\s*['"`]signTransaction['"`]\s*\]\s*\(/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(calls, [REFUNDS_SERVICE_FILE], `the merchant signer may be called only by the refunds service; found: ${calls.join(', ')}`);
+  const service = stripComments(read(path.join(ROOT, REFUNDS_SERVICE_FILE)));
+  assert.equal((service.match(/\[\s*['"`]signTransaction['"`]\s*\]\s*\(/g) ?? []).length, 1, 'exactly one signing call in the refunds service');
+  const helperStart = service.indexOf('function requestMerchantSignature(');
+  assert.ok(helperStart > 0 && service.indexOf("signer['signTransaction'](") > helperStart, 'the call must live inside requestMerchantSignature()');
+  const requests = files.filter((f) => /\brequestMerchantSignature\s*\(/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(requests, [REFUNDS_SERVICE_FILE], 'only the refunds service may request a merchant signature');
+  assert.equal((service.match(/requestMerchantSignature\(/g) ?? []).length, 2, 'one call site plus the helper definition');
+  // 3. What is checked BEFORE the request and AFTER it, in order.
+  const request = service.indexOf('signedBase64 = await requestMerchantSignature(');
+  assert.ok(request > 0, 'the request call site moved');
+  const before = service.slice(0, request);
+  for (const needle of [
+    'loadRefundContext(', 'row.destinationAddress !== context.destination', 'row.sourceAddress !== context.source', 'treasury !== row.sourceAddress',
+    'treasury === row.destinationAddress', 'buildUnsignedTransaction(', 'REFUNDABLE_NOW.includes(order.status)',
+  ]) {
+    assert.ok(before.includes(needle), `the refunds service no longer checks "${needle}" before asking the merchant signer`);
+  }
+  const after = service.slice(request);
+  assert.ok(after.indexOf('verifyMerchantSignature(') > 0 && after.indexOf('verifyMerchantSignature(') < after.indexOf('chain.broadcast('), 'the signed transaction must be verified before it is broadcast');
+  const verifier = service.slice(service.indexOf('private verifyMerchantSignature('), service.indexOf('// verify\n') > 0 ? service.indexOf('// verify\n') : undefined);
+  for (const needle of ['expectedMessage', 'serializeMessage()', 'feePayer', 'verifySignatures()', 'signatures.length !== 1']) {
+    assert.ok(verifier.includes(needle), `verifyMerchantSignature no longer checks "${needle}"`);
+  }
+  // 4. No destination parameter anywhere in the public methods, and no key material in the port or the admin order refund files.
+  assert.doesNotMatch(service, /async\s+(?:requestRefund|prepareAndSubmit)\s*\([^)]*\b(?:destination|address|wallet)\w*\s*:/i, 'refund methods must not accept a destination');
+  const port = stripComments(read(path.join(ROOT, MERCHANT_PORT_FILE)));
+  assert.doesNotMatch(port, /secret|generateKeyPair|Keypair|createPrivateKey|process\.env|\bfs\b/i, 'the merchant signer port must hold no key material');
+  const adminFiles = listSourceFiles(path.join(API_SRC, 'admin/orders')).filter((f) => /admin-order-refund\./.test(f));
+  assert.ok(adminFiles.length >= 4, 'admin order refund files not found');
+  for (const f of adminFiles) {
+    assert.doesNotMatch(stripComments(read(f)), /secret|Keypair|createPrivateKey|generateKeyPair|MERCHANT_SIGNER|MerchantSigner|signTransaction|signMessage|process\.env|\bfs\b/i, `${rel(f)} must neither sign nor reference the signer or key material`);
+  }
+  // 5. The dev key lives only under tools/dev: the API source never names the dev env variable or imports the dev signer.
+  const leaking = files.filter((f) => /DEV_TREASURY_KEYPAIR_FILE|dev-treasury-signer/.test(read(f)) || /(?:from|require\()\s*['"][^'"]*tools\/dev/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(leaking, [], `apps/api/src must not reference the dev treasury key or tools/dev: ${leaking.join(', ')}`);
+});
+
+test('custody: the dev treasury binding is devnet-only: refuses unless development + devnet + a treasury that equals the key, is a different key, and is bound by override only', () => {
+  const launcher = stripComments(read(path.join(ROOT, DEV_LAUNCHER_FILE)));
+  assert.match(launcher, /process\.env\.NODE_ENV\s*!==\s*'development'/, 'launcher must still require NODE_ENV=development');
+  assert.match(launcher, /WALLET_CHAIN_MODE\s*!==\s*'devnet'/, 'launcher must still require devnet');
+  assert.match(launcher, /DEV_TREASURY_KEYPAIR_FILE/, 'launcher must read the treasury key file from DEV_TREASURY_KEYPAIR_FILE');
+  const block = launcher.slice(launcher.indexOf('DEV_TREASURY_KEYPAIR_FILE?.trim()'));
+  assert.match(block, /configured\s*!==\s*merchantTreasury[\s\S]{0,80}fail\(/, 'the launcher must refuse when SOLANA_USDC_TREASURY is not the key\'s public key');
+  assert.match(block, /!configured[\s\S]{0,60}fail\(/, 'the launcher must refuse when SOLANA_USDC_TREASURY is unset');
+  assert.match(block, /equals\(sponsor\.publicKey\)[\s\S]{0,60}fail\(/, 'the treasury key must differ from the fee-payer key');
+  assert.match(launcher, /overrideProvider\(MERCHANT_SIGNER\)\.useValue\(merchantSigner\)/, 'MERCHANT_SIGNER is bound by override, and only when a key file was given');
+  assert.match(launcher, /if\s*\(merchantSigner\)\s*builder\.overrideProvider/, 'no key file => no binding');
+  const signer = stripComments(read(path.join(ROOT, DEV_TREASURY_SIGNER_FILE)));
+  for (const needle of ['feePayer', 'instructions.length !== 1', 'TOKEN_PROGRAM_ID', 'decodeTransferCheckedInstruction', 'amountAtomic', 'context.destination', 'DEVNET_USDC_MINT']) {
+    assert.ok(signer.includes(needle), `the dev treasury signer no longer enforces "${needle}"`);
+  }
+  assert.doesNotMatch(signer, /console\.|logger/, 'the dev treasury signer must never print');
+  assert.match(read(path.join(ROOT, '.env.example')), /^DEV_TREASURY_KEYPAIR_FILE=$/m, '.env.example documents DEV_TREASURY_KEYPAIR_FILE and leaves it blank');
+});
+
 // MoonPay's URL-signing secret may be named only in the provider and in the env config loader.
 const MOONPAY_SECRET_FILES = ['apps/api/src/wallet/wallet.config.ts'];
 // Scan hits may carry repo-relative paths; normalize before comparing or reading.

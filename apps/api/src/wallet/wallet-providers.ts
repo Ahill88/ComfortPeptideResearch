@@ -14,7 +14,21 @@ export interface WalletProviderDescriptor extends WalletProviderInfo {
   realFundsSuitable: boolean;
 }
 
-export function describeWalletProvider(name: WalletProviderName, config: Pick<WalletRuntimeConfig, 'privyAppId'>): WalletProviderDescriptor {
+type ProviderConfig = Pick<WalletRuntimeConfig, 'privyAppId' | 'isProductionLike' | 'solanaNetwork'>;
+
+/**
+ * The `sandbox` provider records a throwaway key that lives in a browser's localStorage. It is allowed only when the runtime is
+ * EXPLICITLY not production-like (exactly NODE_ENV=development|test: allowlist semantics, an omitted flag is denied) AND the chain
+ * is not mainnet: otherwise a MoonPay purchase could deliver real USDC to a key anyone with that browser profile controls.
+ */
+export function isSandboxProviderAllowed(config: Pick<WalletRuntimeConfig, 'isProductionLike' | 'solanaNetwork'>): boolean {
+  return config.isProductionLike === false && config.solanaNetwork !== 'solana-mainnet';
+}
+
+export const SANDBOX_PROVIDER_REFUSED_MESSAGE =
+  'The sandbox wallet provider cannot be linked on mainnet or in a production-like runtime: its key lives in a browser and is not for real funds.';
+
+export function describeWalletProvider(name: WalletProviderName, config: ProviderConfig): WalletProviderDescriptor {
   if (name === 'privy') {
     const configured = Boolean(config.privyAppId);
     return {
@@ -35,7 +49,8 @@ export function describeWalletProvider(name: WalletProviderName, config: Pick<Wa
     name: 'sandbox',
     label: 'Sandbox wallet (devnet only)',
     custody: 'USER_OWNED',
-    active: true,
+    // Inactive (cannot be linked) on mainnet and in every production-like runtime; see isSandboxProviderAllowed.
+    active: isSandboxProviderAllowed(config),
     requirements: [],
     realFundsSuitable: false,
     recoverySupported: false,

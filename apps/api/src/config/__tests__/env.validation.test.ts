@@ -106,8 +106,10 @@ test('live-funds flags are refused without the exact acknowledgement (every envi
       for (const wrong of ['true', 'yes', 'i_accept_live_funds_risk', `${LIVE_FUNDS_ACK_VALUE} `, '']) {
         assert.match(errorsOf({ ...base, [flag]: 'true', WALLET_LIVE_ACKNOWLEDGED: wrong }), /WALLET_LIVE_ACKNOWLEDGED/, `wrong ack ${JSON.stringify(wrong)}`);
       }
+      // The acknowledgement satisfies only the acknowledgement rule. Whether the live flag itself is acceptable (production-like
+      // runtime, mainnet network, ...) is decided by the network checks: see solana-network.env.test.ts for the full mainnet setup.
       const ok = validateEnv({ ...base, [flag]: 'true', WALLET_LIVE_ACKNOWLEDGED: LIVE_FUNDS_ACK_VALUE });
-      assert.deepEqual(ok.errors, []);
+      assert.doesNotMatch(ok.errors.join('\n'), /WALLET_LIVE_ACKNOWLEDGED/);
       assert.match(ok.warnings.join('\n'), /LIVE FUNDS ENABLED/);
     }
   }

@@ -42,7 +42,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .skip-link { background: var(--ink); color: #fff; left: 8px; padding: 12px 16px; position: absolute; top: -80px; z-index: 50; }
 .skip-link:focus { top: 8px; color: #fff; }
 .shell { display: grid; grid-template-columns: 208px minmax(0, 1fr); min-height: 100vh; }
-.sidebar { background: var(--ink); color: #e2e8f0; padding: 16px 12px; position: sticky; top: 0; height: 100vh; }
+.sidebar { background: var(--ink); color: #e2e8f0; padding: 16px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
 .brand { align-items: center; color: #fff; display: flex; font-weight: 650; gap: 10px; min-height: 44px; padding: 0 6px; text-decoration: none; }
 .brand:hover { color: #fff; }
 .brand small { color: #cbd5e1; display: block; font: 500 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; }
@@ -218,6 +218,17 @@ a.card:hover { background: #f1f5f9; color: var(--ink); border-color: var(--ink);
 .confirm h3 { font-size: 15px; margin-bottom: 8px; }
 .confirm .address { font-size: 15px; }
 .confirm dl { margin: 0 0 8px; }
+
+/* Operations: stock ledger, totals, refunds, compliance and outbox. */
+.plain-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.wrap { overflow-wrap: anywhere; white-space: pre-wrap; }
+.queue-totals { padding: 6px 0; }
+.queue-totals small { color: var(--muted); display: block; font-size: 12px; }
+.inventory-detail h2 { scroll-margin-top: 16px; }
+.inventory-detail .form-grid > *, .detail-grid > *, .dl > * { min-width: 0; }
+.inventory-detail .table-wrap { margin-top: 12px; }
+.inventory-detail form { margin-bottom: 20px; }
+.inventory-detail h3 { font-size: 16px; }
 
 /* Credentials (shown once) */
 .secret { background: #fff; border: 2px solid var(--ink); margin-bottom: 12px; padding: 10px 12px; }

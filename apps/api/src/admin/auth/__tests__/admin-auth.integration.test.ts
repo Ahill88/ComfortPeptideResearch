@@ -100,7 +100,7 @@ const field = (out: string, name: string) => new RegExp(`^${name.replace(/[()]/g
 
 test('postgres: create-admin CLI (pnpm admin:create, NODE_ENV=production) makes an account that signs in end to end over HTTP', { timeout: 120_000 }, async () => {
   const email = `cli-owner@${harness.tag}.example.test`;
-  const run = runCli(['--email', email, '--name', 'CLI Owner', '--role', 'OWNER'], {}, true);
+  const run = runCli(['--email', email, '--name', 'CLI Owner', '--role', 'OWNER'], { ADMIN_MFA_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, true);
   assert.equal(run.status, 0, `${run.stdout}\n${run.stderr}`);
   const password = field(run.stdout, 'Temporary password');
   const uri = field(run.stdout, 'MFA otpauth URI');
@@ -130,7 +130,7 @@ test('postgres: create-admin CLI (pnpm admin:create, NODE_ENV=production) makes 
 
 test('postgres: create-admin CLI refuses an existing email, a missing or short key, and bad arguments (nothing is created)', { timeout: 120_000 }, async () => {
   const existing = await harness.makeAdmin('STAFF', 'cli-existing');
-  const dup = runCli(['--email', existing.email.toUpperCase(), '--name', 'Dup', '--role', 'STAFF'], {});
+  const dup = runCli(['--email', existing.email.toUpperCase(), '--name', 'Dup', '--role', 'STAFF'], { ADMIN_MFA_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
   assert.equal(dup.status, 2, dup.stderr);
   assert.match(dup.stderr, /already exists/);
   assert.equal(dup.stdout, '');
@@ -142,8 +142,8 @@ test('postgres: create-admin CLI refuses an existing email, a missing or short k
     assert.match(run.stderr, /ADMIN_MFA_ENCRYPTION_KEY/);
     assert.equal(run.stdout, '');
   }
-  const bad = runCli(['--email', email, '--name', 'Bad Role', '--role', 'ROOT'], {});
+  const bad = runCli(['--email', email, '--name', 'Bad Role', '--role', 'ROOT'], { ADMIN_MFA_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
   assert.equal(bad.status, 1);
-  assert.equal(runCli(['--email', 'not-an-email', '--name', 'X', '--role', 'STAFF'], {}).status, 1);
+  assert.equal(runCli(['--email', 'not-an-email', '--name', 'X', '--role', 'STAFF'], { ADMIN_MFA_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }).status, 1);
   assert.equal(await prisma.adminUser.count({ where: { email } }), 0, 'no account is created on any refusal');
 });

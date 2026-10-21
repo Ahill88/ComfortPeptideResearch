@@ -37,3 +37,14 @@ test('REQUIRE_PUBLISHED_COA=true keeps only lots with a published coa (list and 
 test('unknown slug is still 404', async () => {
   await assert.rejects(() => service.one('nope'), NotFoundException);
 });
+
+test('the back-office lowStockThreshold never appears in the public catalog (list and one)', async () => {
+  const withThreshold = { ...product, lowStockThreshold: 5 };
+  const leaky = new CatalogService({
+    ...prisma,
+    product: { findMany: async () => [structuredClone(withThreshold)], findUnique: async () => structuredClone(withThreshold) },
+  } as any);
+  assert.ok(!('lowStockThreshold' in (await leaky.one('p-1'))));
+  assert.ok(!('lowStockThreshold' in (await leaky.list())[0]));
+  assert.ok(!JSON.stringify(await leaky.list()).includes('lowStockThreshold'));
+});

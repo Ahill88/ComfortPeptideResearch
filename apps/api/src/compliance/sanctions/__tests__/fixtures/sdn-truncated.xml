@@ -1,0 +1,78 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>01/02/2026</Publish_Date>
+    <Record_Count>7</Record_Count>
+  </publshInformation>
+  <!-- SYNTHETIC FIXTURE. Structure copied from the real legacy SDN.XML export; names, uids and addresses are invented. -->
+  <sdnEntry>
+    <uid>900001</uid>
+    <lastName>FIXTURE ENTITY ALPHA &amp; SONS</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>FIXTURE-PROGRAM</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>900101</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>FIXTURE ALPHA</lastName>
+      </aka>
+    </akaList>
+    <addressList>
+      <address>
+        <uid>900201</uid>
+        <city>Nowhere</city>
+        <country>Fixtureland</country>
+      </address>
+    </addressList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>900002</uid>
+    <firstName>Fixture</firstName>
+    <lastName>PERSON, ONE</lastName>
+    <sdnType>Individual</sdnType>
+    <remarks>(Linked To: FIXTURE ENTITY ALPHA &amp; SONS)</remarks>
+    <programList>
+      <program>FIXTURE-PROGRAM</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>900301</uid>
+        <idType>Passport</idType>
+        <idNumber>FX1234567</idNumber>
+        <idCountry>Fixtureland</idCountry>
+        <issueDate>01 Jan 2020</issueDate>
+        <expirationDate>01 Jan 2030</expirationDate>
+      </id>
+      <id>
+        <uid>900302</uid>
+        <idType>Digital Currency Address - XBT</idType>
+        <idNumber>1SyntheticFixtureXbtAddress0000001</idNumber>
+      </id>
+      <id>
+        <uid>900303</uid>
+        <idType>Digital Currency Address - XBT</idType>
+        <idNumber>bc1qsyntheticfixturexbtaddress000000002</idNumber>
+      </id>
+      <id>
+        <uid>900304</uid>
+        <idType>Digital Currency Address - ETH</idType>
+        <idNumber>0xFeedFace00000000000000000000000000000001</idNumber>
+      </id>
+      <id>
+        <uid>900305</uid>
+        <idType>Digital Currency Address - USDC</idType>
+        <idNumber>0xabcdef0000000000000000000000000000000002</idNumber>
+      </id>
+      <id>
+        <uid>900306</uid>
+        <idType>Digital Currency Address - SOL</idType>
+        <idNumber>FixtureSo1anaSanctionedAddressxxxxxxxxxxxx</idNumber>
+      </id>
+    </idList>
+    <dateOfBirthList>
+      <dateOfBirthItem>
+        <uid>900401</uid>
+        <dateOfBirth>01 Jan 1970</dateOfBirth>

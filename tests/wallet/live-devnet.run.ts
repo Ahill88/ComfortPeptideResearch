@@ -141,6 +141,12 @@ async function main() {
   @Global()
   @Module({ providers: [{ provide: PrismaService, useValue: prisma }], exports: [PrismaService] })
   class RealPrismaModule {}
+  // COMPLIANCE_SCREEN is provided by the global SanctionsModule in the app; this manual run binds allow-all (no database list here).
+  const { COMPLIANCE_SCREEN: SCREEN_TOKEN } = await import('../../apps/api/src/wallet/wallet.tokens');
+  const { AllowAllComplianceScreen } = await import('../../apps/api/src/wallet/transfers/compliance-screen');
+  @Global()
+  @Module({ providers: [{ provide: SCREEN_TOKEN, useFactory: () => new AllowAllComplianceScreen() }], exports: [SCREEN_TOKEN] })
+  class AllowAllScreenModule {}
   const { FEE_PAYER_SIGNER } = await import('../../apps/api/src/wallet/checkout/ports');
   // Test-only signer for the sponsor key, bound the way a production KMS signer would be (listed AFTER the default ports).
   const feePayerSigner = sponsor
@@ -155,7 +161,7 @@ async function main() {
     : null;
   const providers = feePayerSigner ? [...checkoutPortProviders, { provide: FEE_PAYER_SIGNER, useValue: feePayerSigner }] : checkoutPortProviders;
   const moduleRef = await Test.createTestingModule({
-    imports: [RealPrismaModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers })],
+    imports: [RealPrismaModule, AllowAllScreenModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers })],
   }).compile();
   const app = moduleRef.createNestApplication({ logger: ['error', 'warn'] });
   app.setGlobalPrefix('v1');

@@ -34,8 +34,17 @@ test('selectRateLimitBucket: money-moving routes', () => {
 });
 
 test('selectRateLimitBucket: auth/credential routes', () => {
-  for (const path of ['/v1/auth/login', '/v1/auth/register', '/v1/auth/password-reset/request', '/v1/AUTH/profile', '/v1/auth', '/v1/auth/']) {
+  for (const path of [
+    '/v1/auth/login', '/v1/auth/register', '/v1/auth/password-reset/request', '/v1/auth/password-reset/confirm',
+    '/v1/auth/email-verification/confirm', '/v1/AUTH/LOGIN', '/v1/auth/mfa/disable', '/v1/auth/mfa', '/v1/auth/something-new', '/v1/auth', '/v1/auth/',
+  ]) {
     assert.equal(selectRateLimitBucket(path), 'auth', path);
+  }
+});
+
+test('selectRateLimitBucket: signed-in, non-credential /auth routes use only the default bucket', () => {
+  for (const path of ['/v1/auth/session', '/v1/AUTH/profile', '/v1/auth/addresses', '/v1/auth/addresses/ckx1', '/v1/auth/logout', '/v1/auth/mfa/enroll', '/v1/auth/mfa/enroll/confirm']) {
+    assert.equal(selectRateLimitBucket(path), null, path);
   }
 });
 

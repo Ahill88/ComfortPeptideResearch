@@ -15,7 +15,7 @@ contain customer email and shipping address. Source: `apps/api/src/admin/orders/
 | `POST /:id/start-packing` `{}` | `PAID -> PROCESSING` |
 | `POST /:id/ship` `{ carrier, trackingNumber, note? }` | `PROCESSING -> SHIPPED`, creates the Shipment |
 | `POST /:id/mark-delivered` `{}` | `SHIPPED -> DELIVERED`, sets `deliveredAt` on the order's shipments |
-| `POST /:id/cancel` `{ reason }` | `PENDING_PAYMENT -> CANCELLED` only |
+| `POST /:id/cancel` `{ reason }` | `PENDING_PAYMENT -> CANCELLED` only; the order's reserved stock is returned in the same transaction (`docs/api/inventory-and-totals.md`) |
 | `POST /:id/notes` `{ note }` | appends a `NOTE` event, no status change |
 
 Every action answers `200` with the updated `AdminOrderDetail`.
@@ -34,7 +34,8 @@ Every action answers `200` with the updated `AdminOrderDetail`.
 
 ```
 AdminOrderSummary = {
-  id, status, totalCents: number, currency, createdAt: ISO,
+  id, status, subtotalCents: number | null (null for orders created before totals were stored), shippingCents: number, taxCents: number,
+  totalCents: number (= subtotal + shipping + tax), currency, createdAt: ISO,
   customer: { id, email, name: string | null },
   itemCount: number            // sum of line quantities
   hasShipment: boolean,
@@ -46,7 +47,8 @@ AdminOrderDetail = AdminOrderSummary & {
   payment: null | { status, amountAtomic: string, txSignature: string | null, network, finalizedAt: ISO | null },
   shipments: [{ id, carrier, trackingNumber, shippedAt, deliveredAt: ISO | null, note: string | null }],
   events: [{ id, kind: 'STATUS' | 'NOTE', fromStatus, toStatus, note, adminName: string | null, createdAt }], // oldest first
-  allowedActions: ('start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'add-note')[]               // add-note always
+  refund: null | { id, status: 'REQUESTED' | 'SUBMITTED' | 'FINALIZED' | 'FAILED', amountAtomic: string, txSignature: string | null, requestedAt: ISO, failureReason: string | null }, // docs/api/admin-refunds.md
+  allowedActions: ('start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'refund' | 'add-note')[]    // add-note always; refund on PAID/PROCESSING with no refund in progress
 }
 ```
 
@@ -100,16 +102,16 @@ Refused actions (409/404) are not audited.
 - **No inventory decrement.** `Product.inventory` is not touched by any transition.
 - **No email notifications** to the customer on any transition.
 - **No carrier label purchase** or tracking lookup; the owner types the tracking number from a label bought elsewhere.
-- **Cancelling a paid order is refunds.** `PAID`, `PROCESSING` and `SHIPPED` orders cannot be cancelled here; they go through the
-  refunds process (`/admin/refunds`), which this module neither calls nor imports.
-- **No money or payment changes.** No route marks an order `PAID`, creates a refund, or writes payment/wallet rows.
-  Wallet internals are not imported; `CryptoTransaction` is only read through Prisma.
+- **Cancelling a paid order is refunds.** `PAID`, `PROCESSING` and `SHIPPED` orders cannot be cancelled here; paid ones are refunded by the
+  owner through `POST /:id/refund[/submit|/verify]` (`docs/api/admin-refunds.md`, separate controller `admin-order-refund.*`).
+- **No money or payment changes in this controller.** No route here marks an order `PAID`, creates a refund, or writes payment/wallet rows.
+  `CryptoTransaction` is only read through Prisma; refunds live in the separate owner-only refund routes.
 - No editing of the shipping address, items or totals.
 
 ## Operational notes
 
-- The refunds engine only accepts orders whose status is `PAID`. After `start-packing` an order is `PROCESSING`, so a refund
-  for it has to be handled before packing starts (or the refunds rules changed); this API does not work around that.
+- The refunds engine accepts `PAID` and `PROCESSING` orders (an order being packed can still be refunded). While a refund is `SUBMITTED`,
+  `start-packing` and `ship` answer `409 A refund is in progress for this order.`
 - Cancelling a `PENDING_PAYMENT` order does not stop an in-flight payment attempt. If funds land afterwards, wallet settlement
   cannot mark the cancelled order `PAID`; it rolls back and flags the purchase `manual refund required` (existing behaviour in
   `verification.service.ts`, not changed here).

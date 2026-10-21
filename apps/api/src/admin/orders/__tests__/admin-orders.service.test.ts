@@ -9,7 +9,10 @@ const actor = { id: 'admin-1', ip: '127.0.0.1' };
 
 function setup() {
   const double = createAdminOrdersDouble();
-  return { ...double, service: new AdminOrdersService(double.prisma as any, double.audit as any) };
+  // Spy for the stock-release port (the real InventoryService is exercised in the commerce and integration suites).
+  const releases: Array<{ tx: unknown; orderId: string; reason: string }> = [];
+  const inventory = { failWith: undefined as Error | undefined, releaseForOrder: async (tx: unknown, orderId: string, reason: string) => { if (inventory.failWith) throw inventory.failWith; releases.push({ tx, orderId, reason }); } };
+  return { ...double, releases, inventory, service: new AdminOrdersService(double.prisma as any, double.audit as any, undefined, inventory as any) };
 }
 const ship = (service: AdminOrdersService, id: string, trackingNumber = '9400 1118 9922') => service.ship(id, { carrier: 'USPS', trackingNumber }, actor);
 const status = (error: unknown) => (error as { getStatus?: () => number }).getStatus?.();
@@ -64,7 +67,7 @@ test('full lifecycle PAID -> PROCESSING -> SHIPPED -> DELIVERED writes events, o
 
   const packing = await service.startPacking(order.id, actor);
   assert.equal(packing.status, 'PROCESSING');
-  assert.deepEqual(packing.allowedActions, ['ship', 'add-note']);
+  assert.deepEqual(packing.allowedActions, ['ship', 'refund', 'add-note']); // PROCESSING with no refund in progress may be refunded (docs/api/admin-refunds.md)
 
   const shipped = await service.ship(order.id, { carrier: 'UPS', trackingNumber: '1Z 999 AA1', note: 'left with the dog' }, actor);
   assert.equal(shipped.status, 'SHIPPED');
@@ -153,6 +156,49 @@ test('cancel works only from PENDING_PAYMENT, stores the reason on the event and
   assert.ok(!JSON.stringify(state.audits).includes('customer asked'));
 });
 
+test('summary and detail carry subtotalCents (null for legacy orders), shippingCents and taxCents', async () => {
+  const { service, addOrder } = setup();
+  const legacy = addOrder();
+  const legacyDetail = await service.detail(legacy.id);
+  assert.deepEqual({ s: legacyDetail.subtotalCents, h: legacyDetail.shippingCents, t: legacyDetail.taxCents }, { s: null, h: 0, t: 0 });
+  const priced = addOrder({ totalCents: 2764, subtotalCents: 2000, shippingCents: 599, taxCents: 165 } as any);
+  const detail = await service.detail(priced.id);
+  assert.deepEqual({ s: detail.subtotalCents, h: detail.shippingCents, t: detail.taxCents, total: detail.totalCents }, { s: 2000, h: 599, t: 165, total: 2764 });
+});
+
+test('cancel releases the order stock through the inventory port inside the same transaction as the status flip', async () => {
+  const { service, addOrder, releases, state } = setup();
+  const order = addOrder({ status: 'PENDING_PAYMENT' });
+  await service.cancel(order.id, 'customer asked', actor);
+  assert.equal(releases.length, 1);
+  assert.equal(releases[0].orderId, order.id);
+  assert.equal(releases[0].reason, 'Cancelled by admin');
+  assert.notEqual(releases[0].tx, undefined, 'called with the transaction client, not outside a transaction');
+  // A second cancel (double click) is a 409 and does not release again.
+  await assert.rejects(service.cancel(order.id, 'again', actor), ConflictException);
+  assert.equal(releases.length, 1);
+  assert.equal(state.events.length, 1);
+});
+
+test('if the stock release fails the cancel is rolled back completely (still PENDING_PAYMENT, no event, no audit)', async () => {
+  const { service, addOrder, inventory, state } = setup();
+  const order = addOrder({ status: 'PENDING_PAYMENT' });
+  inventory.failWith = new Error('ledger unavailable');
+  await assert.rejects(service.cancel(order.id, 'x', actor), /ledger unavailable/);
+  assert.equal(state.orders[0].status, 'PENDING_PAYMENT');
+  assert.equal(state.events.length, 0);
+  assert.equal(state.audits.length, 0);
+});
+
+test('a PAID order cancel attempt never touches stock; money/fulfilment moves do not release stock either', async () => {
+  const { service, addOrder, releases } = setup();
+  const paid = addOrder({ status: 'PAID' });
+  await assert.rejects(service.cancel(paid.id, 'x', actor), ConflictException);
+  await service.startPacking(paid.id, actor);
+  await ship(service, paid.id);
+  assert.equal(releases.length, 0);
+});
+
 test('10 parallel ship calls: exactly one succeeds, nine are 409, exactly one shipment, one STATUS event, one audit row', async () => {
   const { service, addOrder, state } = setup();
   const order = addOrder({ status: 'PROCESSING' });
@@ -220,7 +266,7 @@ test('detail: shipping address, items with sku/name, payment summary from the be
   assert.equal(detail.itemCount, 2);
   assert.deepEqual(detail.payment, { status: 'FINALIZED', amountAtomic: '2500000', txSignature: 'sig-abc', network: 'solana-devnet', finalizedAt: '2026-10-01T12:10:00.000Z' });
   assert.deepEqual(detail.customer, { id: 'cust-1', email: 'buyer@example.test', name: 'Bea Buyer' });
-  assert.deepEqual(Object.keys(detail).sort(), ['allowedActions', 'createdAt', 'currency', 'customer', 'events', 'hasShipment', 'id', 'itemCount', 'items', 'payment', 'shipments', 'shippingAddress', 'status', 'totalCents', 'trackingNumber']);
+  assert.deepEqual(Object.keys(detail).sort(), ['allowedActions', 'createdAt', 'currency', 'customer', 'events', 'hasShipment', 'id', 'itemCount', 'items', 'payment', 'refund', 'shipments', 'shippingAddress', 'shippingCents', 'status', 'subtotalCents', 'taxCents', 'totalCents', 'trackingNumber']);
   assert.ok(!JSON.stringify(detail).includes('WALLET-'));
   assert.equal(detail.hasShipment, false);
   assert.equal(detail.trackingNumber, null);

@@ -131,7 +131,7 @@ test('prepare with max:true sends the full spendable balance (after reservations
   const { h, customer, address, destination } = await setup(USDC(100));
   await h.prisma.creditReservation.create({ data: { customerId: customer.id, orderId: 'o1', amountAtomic: USDC(30), expiresAt: new Date(Date.now() + 60_000) } });
   await h.prisma.cryptoTransaction.create({
-    data: { customerId: customer.id, type: 'PURCHASE', status: 'SUBMITTED', amountAtomic: USDC(5), sourceAddress: address, destinationAddress: 'x', mint: USDC_DEVNET_MINT, network: 'n', reference: 'p1' },
+    data: { customerId: customer.id, type: 'PURCHASE', status: 'SUBMITTED', amountAtomic: USDC(5), sourceAddress: address, destinationAddress: 'x', mint: USDC_DEVNET_MINT, network: 'solana-devnet', reference: 'p1' },
   });
   const prepared = await h.transfers.prepare(customer.id, { destination, max: true });
   assert.equal(prepared.amountAtomic, USDC(65));

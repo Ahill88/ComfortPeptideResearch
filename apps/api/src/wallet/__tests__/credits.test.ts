@@ -59,7 +59,7 @@ test('spendable never goes negative when pending exceeds the chain balance', asy
   const { customer, address } = await linkCustomer(h);
   h.chain.creditUsdc(address, 1_000_000n);
   await h.prisma.cryptoTransaction.create({
-    data: { customerId: customer.id, type: 'WITHDRAWAL', status: 'SUBMITTED', amountAtomic: 9_000_000n, sourceAddress: address, destinationAddress: 'x', mint: 'm', network: 'n', reference: 'r1' },
+    data: { customerId: customer.id, type: 'WITHDRAWAL', status: 'SUBMITTED', amountAtomic: 9_000_000n, sourceAddress: address, destinationAddress: 'x', mint: 'm', network: 'solana-devnet', reference: 'r1' },
   });
   const balance = await h.credits.getBalance(customer.id);
   assert.equal(balance.spendableAtomic, 0n);

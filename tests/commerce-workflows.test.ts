@@ -17,7 +17,9 @@ const signature = '5Yv3jS1dSGmHz4B1bYy3hDJxJ7ivUHrb2dny1sy9aPDAZHqj7Qq3YHGG4PBym
 function createOrdersService(products = [product]) {
   const createdOrders: any[] = [];
   const prisma = {
-    product: { findMany: async () => products },
+    // Stock is not what these cart tests are about: every conditional reservation succeeds (stock is plentiful).
+    product: { findMany: async () => products, updateMany: async () => ({ count: 1 }) },
+    inventoryAdjustment: { create: async (input: any) => ({ id: 'adj-1', ...input.data }) },
     customer: {
       findUnique: async () => null,
       create: async (input: any) => ({ id: 'customer-1', ...input.data }),
@@ -29,6 +31,7 @@ function createOrdersService(products = [product]) {
         return { id: 'order-1', currency: 'USD', status: 'PENDING_PAYMENT', createdAt: new Date(), ...input.data, items: [] };
       },
     },
+    $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma),
   };
 
   return { service: new OrdersService(prisma as any), createdOrders };
@@ -46,6 +49,7 @@ test('cart arithmetic persists the product price and summed quantity total in ce
   });
 
   assert.equal(createdOrders[0].totalCents, 5997);
+  assert.deepEqual([createdOrders[0].subtotalCents, createdOrders[0].shippingCents, createdOrders[0].taxCents], [5997, 0, 0], 'no shipping or tax is configured in tests');
   assert.equal(createdOrders[0].items.create[0].unitCents, 1999);
   assert.equal(createdOrders[0].items.create[0].quantity, 3);
   assert.ok(createdOrders[0].researchAcknowledgedAt instanceof Date);

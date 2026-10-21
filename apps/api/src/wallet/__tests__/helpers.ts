@@ -11,6 +11,7 @@ import { AllowAllComplianceScreen, ComplianceScreen } from '../transfers/complia
 import { InMemoryPreparedTransactionStore } from '../transfers/prepared-transaction.store';
 import { TransfersService } from '../transfers/transfers.service';
 import { WalletRuntimeConfig } from '../wallet.config';
+import { isSandboxProviderAllowed } from '../wallet-providers';
 import { WalletService } from '../wallet.service';
 
 type Row = Record<string, any>;
@@ -175,6 +176,14 @@ export function linkRequest(h: Harness, email: string, keypair: Keypair, provide
 
 /** Creates a customer with a linked wallet; returns the customer's (test-only) keypair. */
 export async function linkCustomer(h: Harness, email = 'buyer@example.com', keypair = Keypair.generate()) {
+  if (!isSandboxProviderAllowed({ isProductionLike: h.config.isProductionLike, solanaNetwork: h.chain.network })) {
+    // The sandbox provider cannot be LINKED in a production-like runtime or on mainnet (WalletService refuses it). Tests that probe
+    // those runtimes still need a customer who already has a sandbox wallet, so seed the row the way an earlier link would have.
+    const customer = await h.wallets.resolveCustomer(email);
+    const address = keypair.publicKey.toBase58();
+    const created = await h.prisma.customerWallet.create({ data: { customerId: customer.id, address, provider: 'sandbox', network: h.chain.network } });
+    return { keypair, customer, address, result: { wallet: created, provider: h.wallets.providerDescriptor('sandbox'), created: true } };
+  }
   const result = await h.wallets.associateWallet(email, linkRequest(h, email, keypair));
   const customer = await h.wallets.resolveCustomer(email);
   return { keypair, customer, address: keypair.publicKey.toBase58(), result };

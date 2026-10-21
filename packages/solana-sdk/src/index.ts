@@ -1,3 +1,9 @@
+/*
+ * DEAD / DEVNET-ONLY CODE, left as is on purpose. Nothing in the repository imports this package (the API's wallet stack uses
+ * apps/api/src/wallet/**, whose single mint source is `chain.usdcMint` from SOLANA_USDC_MINT). Every type here is pinned to the
+ * literal network 'devnet' and the devnet mint, so it cannot describe mainnet and must not be extended to: a mainnet adapter
+ * belongs in the API wallet stack, behind its startup checks (docs/wallet/mainnet-readiness.md).
+ */
 export const SOLANA_DEVNET_USDC_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 
 export type SolanaInvoice = {

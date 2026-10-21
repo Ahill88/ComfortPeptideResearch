@@ -17,6 +17,22 @@ export interface WalletChain extends SolanaChain {
   tokenAccountRentLamports(): Promise<bigint>;
 }
 
+/**
+ * THE USDC mint of a chain. A chain that declares none falls back to the built-in mint ONLY on devnet; on any other network this
+ * throws, so a missing mint can never silently become a devnet address on mainnet.
+ */
 export function usdcMintOf(chain: SolanaChain): string {
-  return (chain as Partial<WalletChain>).usdcMint ?? USDC_DEVNET_MINT;
+  const declared = (chain as Partial<WalletChain>).usdcMint;
+  if (declared) return declared;
+  if (chain.network === 'solana-devnet') return USDC_DEVNET_MINT;
+  throw new Error(`No USDC mint is configured for ${chain.network}`);
+}
+
+/** usdcMintOf, but null (never equal to any mint) when the chain declares none: for equality checks that must fail closed. */
+export function usdcMintOrNull(chain: SolanaChain): string | null {
+  try {
+    return usdcMintOf(chain);
+  } catch {
+    return null;
+  }
 }

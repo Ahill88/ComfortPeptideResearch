@@ -15,11 +15,11 @@ import {
   WalletFeatureFlags,
   USDC_DEVNET_MINT,
 } from '../contracts';
+import { DEFAULT_DEVNET_RPC_URL } from '../wallet.config';
 import { ChainRejectedError } from './chain-errors';
 import { BASE_FEE_LAMPORTS_PER_SIGNATURE, WalletChain } from './chain.types';
 
 const COMMITMENT = 'finalized' as const;
-const DEFAULT_RPC_URL = 'https://api.devnet.solana.com';
 
 /**
  * A transaction that DID land (its signature has a status) but whose USDC transfer cannot be read
@@ -70,7 +70,7 @@ function firstByteOfBase58(data: string | undefined): number | null {
 export interface DevnetChainOptions {
   rpcUrl?: string;
   network?: SolanaNetwork;
-  /** Required explicitly for mainnet; defaults to the devnet USDC mint for devnet. */
+  /** THE USDC mint (config.usdcMint). Required explicitly for mainnet; only devnet may fall back to the built-in devnet mint. */
   usdcMint?: string;
   /** Inject a Connection (tests). */
   connection?: Connection;
@@ -93,7 +93,7 @@ export class DevnetSolanaChain implements WalletChain {
   private readonly connection: Connection;
 
   constructor(flags: WalletFeatureFlags, options: DevnetChainOptions = {}) {
-    const rpcUrl = options.rpcUrl ?? process.env.SOLANA_RPC_URL ?? DEFAULT_RPC_URL;
+    const rpcUrl = options.rpcUrl ?? process.env.SOLANA_RPC_URL ?? DEFAULT_DEVNET_RPC_URL;
     this.network = options.network ?? 'solana-devnet';
     const looksMainnet = /mainnet/i.test(rpcUrl);
     if (this.network === 'solana-mainnet' || looksMainnet) {
@@ -104,7 +104,12 @@ export class DevnetSolanaChain implements WalletChain {
         throw new Error('SOLANA_RPC_URL looks like mainnet but SOLANA_NETWORK is devnet; refusing to start.');
       }
       if (!options.usdcMint) throw new Error('Mainnet requires an explicit SOLANA_USDC_MINT.');
+      // A mainnet mint read through the devnet endpoint (the unset-variable default) silently yields zero balances.
+      if (!options.rpcUrl || options.rpcUrl === DEFAULT_DEVNET_RPC_URL || /devnet/i.test(options.rpcUrl)) {
+        throw new Error('Mainnet requires an explicit SOLANA_RPC_URL that is not the devnet default.');
+      }
     }
+    // Only devnet may fall back to the built-in mint; the mainnet branch above already required an explicit one.
     this.usdcMint = options.usdcMint ?? USDC_DEVNET_MINT;
     this.connection = options.connection ?? new Connection(rpcUrl, COMMITMENT);
   }

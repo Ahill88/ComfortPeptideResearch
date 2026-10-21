@@ -13,11 +13,13 @@ import type { CryptoTransaction, OrderStatus } from '@prisma/client';
 import { PublicKey, Transaction } from '@solana/web3.js';
 import { createTransferCheckedInstruction, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PrismaService } from '../../prisma.service';
-import { ChainUnavailableError, USDC_DECIMALS, USDC_DEVNET_MINT, centsToAtomic } from '../contracts';
+import { usdcMintOrNull } from '../chain/chain.types';
+import { ChainUnavailableError, USDC_DECIMALS, centsToAtomic } from '../contracts';
 import { ChainRejectedError } from '../chain/chain-errors';
 import { CHAIN_PORT, type ChainPort } from '../checkout/ports';
 import { KeyedLock, base58Encode, isUniqueViolation, isValidPublicKey, referenceKeyFor } from '../checkout/checkout.util';
 import { MERCHANT_SIGNER, type MerchantSigner } from './merchant-signer.port';
+import { REFUND_ORDER_HOOK, type RefundOrderHook } from './refund-order-hook';
 import type { RefundView, VerifyRefundResult } from './refunds.types';
 
 const MAX_SIGNED_TX_BASE64_CHARS = 2048; // Solana packet limit is 1232 raw bytes.
@@ -27,6 +29,12 @@ const MAX_REQUEST_ATTEMPTS = 5;
 const NON_COUNTING = ['FAILED', 'EXPIRED'];
 /** Order states from which a fully refunded order may move to REFUNDED. */
 const REFUNDABLE_ORDER_STATES: OrderStatus[] = ['PAID', 'PROCESSING', 'SHIPPED', 'DELIVERED'];
+/**
+ * Order states in which a refund may be REQUESTED and SUBMITTED. PROCESSING (being packed, nothing shipped yet) is allowed on
+ * purpose: the owner decides. SHIPPED/DELIVERED orders are never refundable through request/submit.
+ */
+const REFUNDABLE_NOW: OrderStatus[] = ['PAID', 'PROCESSING'];
+const NOT_REFUNDABLE_NOW = 'Order is not in a refundable (PAID or PROCESSING) state';
 
 /**
  * Refunds of PAID credits purchases, as a design-safe engine.
@@ -54,7 +62,14 @@ export class RefundsService {
     @Inject(CHAIN_PORT) private readonly chain: ChainPort,
     /** Optional on purpose: with no signer bound, submitting a refund fails closed (503). */
     @Optional() @Inject(MERCHANT_SIGNER) private readonly signer: MerchantSigner | undefined = undefined,
+    /** Optional: runs inside the finalize transaction that flips the order to REFUNDED (order event, stock release). */
+    @Optional() @Inject(REFUND_ORDER_HOOK) private readonly orderHook: RefundOrderHook | undefined = undefined,
   ) {}
+
+  /** True when a MerchantSigner is bound (otherwise prepareAndSubmit fails closed with 503). */
+  isSigningAvailable(): boolean {
+    return this.signer !== undefined;
+  }
 
   // ---------------------------------------------------------------------------------------------
   // request
@@ -65,7 +80,7 @@ export class RefundsService {
       throw new BadRequestException('amountAtomic must be a positive integer of USDC base units');
     }
     const cleanReason = typeof reason === 'string' ? reason.trim() : '';
-    if (cleanReason.length < 3 || cleanReason.length > 500) throw new BadRequestException('reason must be 3-500 characters');
+    if (cleanReason.length < 1 || cleanReason.length > 500) throw new BadRequestException('reason must be 1-500 characters');
     const cleanActor = typeof actorId === 'string' ? actorId.trim() : '';
     if (cleanActor.length < 1 || cleanActor.length > 100) throw new BadRequestException('actorId is required');
 
@@ -79,7 +94,7 @@ export class RefundsService {
         const created = await this.prisma.$transaction(async (tx) => {
           // Re-check inside the transaction: state may have changed since the reads above.
           const current = await tx.order.findUnique({ where: { id: orderId } });
-          if (!current || current.status !== 'PAID') throw new ConflictException('Order is not in a refundable (PAID) state');
+          if (!current || !REFUNDABLE_NOW.includes(current.status)) throw new ConflictException(NOT_REFUNDABLE_NOW);
           const rows = await tx.cryptoTransaction.findMany({ where: { orderId, type: 'REFUND' } });
           const refunded = rows.filter((r) => !NON_COUNTING.includes(r.status)).reduce((sum, r) => sum + r.amountAtomic, 0n);
           const remaining = total - refunded;
@@ -155,7 +170,7 @@ export class RefundsService {
 
     const order = await this.prisma.order.findUnique({ where: { id: row.orderId! } });
     if (!order) throw new NotFoundException('Order not found');
-    if (order.status !== 'PAID') throw new ConflictException('Order is not in a refundable (PAID) state');
+    if (!REFUNDABLE_NOW.includes(order.status)) throw new ConflictException(NOT_REFUNDABLE_NOW);
     const context = await this.loadRefundContext(order);
     // Never trust the stored row alone: the destination must still be the customer's original wallet.
     if (row.destinationAddress !== context.destination) throw new ConflictException('Refund destination does not match the original purchase');
@@ -211,17 +226,24 @@ export class RefundsService {
     const signature = base58Encode(signed.signatures[0].signature!);
 
     // Claim (compare-and-set) BEFORE broadcasting so concurrent submits cannot both broadcast.
-    let claim;
+    // The order row is touched first (a no-op write that takes its row lock) so that an order moving to SHIPPED at the same
+    // moment either commits before this claim (the refund is refused) or waits for it (and is then refused by the in-flight check).
+    let claimed = false;
     try {
-      claim = await this.prisma.cryptoTransaction.updateMany({
-        where: { id: row.id, status: 'PREPARED' },
-        data: { status: 'SUBMITTED', txSignature: signature, feeLamports: fee },
+      claimed = await this.prisma.$transaction(async (tx) => {
+        const held = await tx.order.updateMany({ where: { id: order.id, status: { in: REFUNDABLE_NOW } }, data: { status: order.status } });
+        if (held.count !== 1) throw new ConflictException(NOT_REFUNDABLE_NOW);
+        const claim = await tx.cryptoTransaction.updateMany({
+          where: { id: row.id, status: 'PREPARED' },
+          data: { status: 'SUBMITTED', txSignature: signature, feeLamports: fee },
+        });
+        return claim.count === 1;
       });
     } catch (error) {
       if (isUniqueViolation(error)) throw new ConflictException('Transaction signature already recorded');
       throw error;
     }
-    if (claim.count !== 1) throw new ConflictException('Refund was already submitted or is no longer prepared');
+    if (!claimed) throw new ConflictException('Refund was already submitted or is no longer prepared');
 
     let broadcastSignature: string;
     try {
@@ -375,9 +397,16 @@ export class RefundsService {
       if (cumulative > total) throw new ConflictException('Finalized refunds exceed the order total'); // rolls back
       let orderRefunded = false;
       if (cumulative === total) {
-        // Conditional update: only the transaction that sees the order not yet REFUNDED flips it, exactly once.
-        const moved = await tx.order.updateMany({ where: { id: orderId, status: { in: REFUNDABLE_ORDER_STATES } }, data: { status: 'REFUNDED' } });
-        orderRefunded = moved.count === 1;
+        // Conditional update: only the transaction that sees the order not yet REFUNDED flips it, exactly once. The status that was
+        // flipped from is captured by the same conditional write, so the hook (stock release only when unshipped) cannot disagree with it.
+        for (let attempt = 0; attempt < 3 && !orderRefunded; attempt++) {
+          const before = await tx.order.findUnique({ where: { id: orderId } });
+          if (!before || !REFUNDABLE_ORDER_STATES.includes(before.status)) break;
+          const moved = await tx.order.updateMany({ where: { id: orderId, status: before.status }, data: { status: 'REFUNDED' } });
+          if (moved.count !== 1) continue; // the status changed under us: re-read and try again
+          orderRefunded = true;
+          await this.orderHook?.onOrderRefunded(tx, { orderId, fromStatus: before.status, refundId: row.id, txSignature: row.txSignature });
+        }
       }
       await tx.walletAuditEvent.create({
         data: {
@@ -468,7 +497,7 @@ export class RefundsService {
     order: { id: string; customerId: string; status: string; totalCents: number; currency: string },
     options: { requirePaid?: boolean } = {},
   ) {
-    if ((options.requirePaid ?? true) && order.status !== 'PAID') throw new ConflictException('Order is not in a refundable (PAID) state');
+    if ((options.requirePaid ?? true) && !REFUNDABLE_NOW.includes(order.status as OrderStatus)) throw new ConflictException(NOT_REFUNDABLE_NOW);
     if (order.currency !== 'USD') throw new ConflictException('Only USD credits purchases can be refunded');
     const purchases = await this.prisma.cryptoTransaction.findMany({ where: { orderId: order.id, type: 'PURCHASE', status: 'FINALIZED' } });
     if (purchases.length === 0) throw new ConflictException('Order has no finalized credits purchase to refund');
@@ -488,8 +517,9 @@ export class RefundsService {
       throw new ConflictException('Original purchase has invalid addresses');
     }
     if (purchase.sourceAddress === purchase.destinationAddress) throw new ConflictException('Customer wallet and treasury must differ');
-    if (purchase.network === 'solana-devnet' && purchase.mint !== USDC_DEVNET_MINT) throw new ConflictException('Unexpected mint on the original purchase');
     if (this.chain.network !== purchase.network) throw new ConflictException('Chain network does not match the original purchase');
+    // The configured mint (chain.usdcMint, env SOLANA_USDC_MINT) on every network, not just devnet.
+    if (purchase.mint !== usdcMintOrNull(this.chain)) throw new ConflictException('Unexpected mint on the original purchase');
     return {
       total,
       source: purchase.destinationAddress,

@@ -2,6 +2,7 @@
 // here, sent as a Bearer header, and never returned, logged, or placed in a URL or error message.
 import { cookies } from 'next/headers';
 import { SESSION_COOKIE } from './cookie';
+import { operational503 } from './operational-errors';
 
 const DEFAULT_API_URL = 'http://localhost:3001/v1';
 
@@ -41,15 +42,16 @@ const FALLBACK: Record<FailureKind, string> = {
   'not-found': 'Not found.',
   conflict: 'That action conflicts with the current state.',
   invalid: 'The request was not accepted.',
-  unavailable: 'The admin API could not be reached. Nothing was changed.',
+  unavailable: 'The request could not be completed. Refresh to check the current state before trying again.',
   error: 'The admin API reported an error. Try again.',
 };
 
-/** Extract the API's `message` for client-facing 4xx errors. 5xx bodies are never echoed. */
-async function messageFrom(response: Response, kind: FailureKind): Promise<string> {
-  if (response.status >= 500) return FALLBACK.error;
+/** Extract 4xx messages and explicitly allow-listed operational 503s; never echo arbitrary 5xx bodies. */
+async function messageFrom(response: Response, kind: FailureKind, path = ''): Promise<string> {
+  if (response.status >= 500 && response.status !== 503) return FALLBACK.error;
   try {
     const body = (await response.json()) as { message?: unknown };
+    if (response.status === 503) return operational503(path, body.message) ?? FALLBACK.error;
     if (typeof body.message === 'string' && body.message.trim()) return body.message.slice(0, 500);
     if (Array.isArray(body.message)) {
       const text = body.message.filter((m): m is string => typeof m === 'string').join(' ');
@@ -94,7 +96,7 @@ export async function callApi<T>(path: string, options: Options = {}): Promise<A
     }
   }
   const kind = kindFor(response.status);
-  return { ok: false, status: response.status, kind, message: await messageFrom(response, kind) };
+  return { ok: false, status: response.status, kind, message: await messageFrom(response, kind, path) };
 }
 
 /**

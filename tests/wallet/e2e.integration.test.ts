@@ -65,9 +65,15 @@ before(async () => {
   @Global()
   @Module({ providers: [{ provide: PrismaService, useValue: realPrisma }], exports: [PrismaService] })
   class RealPrismaModule {}
+  // COMPLIANCE_SCREEN is provided by the global SanctionsModule in the app; this fixture binds allow-all (sanctions have their own suites).
+  const { COMPLIANCE_SCREEN: SCREEN_TOKEN } = await import('../../apps/api/src/wallet/wallet.tokens');
+  const { AllowAllComplianceScreen } = await import('../../apps/api/src/wallet/transfers/compliance-screen');
+  @Global()
+  @Module({ providers: [{ provide: SCREEN_TOKEN, useFactory: () => new AllowAllComplianceScreen() }], exports: [SCREEN_TOKEN] })
+  class AllowAllScreenModule {}
 
   const moduleRef = await Test.createTestingModule({
-    imports: [RealPrismaModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers: checkoutPortProviders })],
+    imports: [RealPrismaModule, AllowAllScreenModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers: checkoutPortProviders })],
   }).compile();
   app = moduleRef.createNestApplication({ logger: process.env.E2E_LOG ? ['error', 'warn'] : false });
   app.setGlobalPrefix('v1');
@@ -978,7 +984,12 @@ async function webhookBase(): Promise<string> {
     @Global()
     @Module({ providers: [{ provide: PrismaService, useValue: prisma }], exports: [PrismaService] })
     class HookPrismaModule {}
-    const moduleRef = await Test.createTestingModule({ imports: [HookPrismaModule, WalletModule] }).compile();
+    const { COMPLIANCE_SCREEN: SCREEN_TOKEN } = await import('../../apps/api/src/wallet/wallet.tokens');
+    const { AllowAllComplianceScreen } = await import('../../apps/api/src/wallet/transfers/compliance-screen');
+    @Global()
+    @Module({ providers: [{ provide: SCREEN_TOKEN, useFactory: () => new AllowAllComplianceScreen() }], exports: [SCREEN_TOKEN] })
+    class HookScreenModule {}
+    const moduleRef = await Test.createTestingModule({ imports: [HookPrismaModule, HookScreenModule, WalletModule] }).compile();
     const created = moduleRef.createNestApplication<import('@nestjs/platform-express').NestExpressApplication>({ logger: false });
     created.setGlobalPrefix('v1');
     created.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
@@ -1248,5 +1259,127 @@ test('moonpay webhook (real DB): concurrent, duplicated and shuffled deliveries 
     // Row createdAt is deliberately NOT asserted to be monotonic: a delivery whose transaction started earlier can wait for the
     // row lock and commit later with an earlier createdAt. That is exactly why the service takes the maximum moonpayUpdatedAt
     // over an intent's PROCESSED rows instead of trusting the newest row.
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Durable prepared-message store: a prepared checkout survives an API restart.
+//
+// The default store is Postgres (DATABASE_URL is set), so "restart" = build a SECOND Nest app over the same database. It is a
+// separate module graph with separate service and store instances, so nothing in process memory is shared with the first app.
+// The sandbox chain is the only thing carried over (a real cluster outlives an API restart; the in-memory sandbox does not).
+// ---------------------------------------------------------------------------------------------
+
+/** A second, independent Nest app over the same database; `storeMode` is applied while its modules compile (they read env then). */
+async function restartedApp(storeMode?: 'memory') {
+  const { Global, Module, ValidationPipe } = await import('@nestjs/common');
+  const { Test } = await import('@nestjs/testing');
+  const { PrismaService } = await import('../../apps/api/src/prisma.service');
+  const { WalletModule } = await import('../../apps/api/src/wallet/wallet.module');
+  const { CheckoutModule } = await import('../../apps/api/src/wallet/checkout/checkout.module');
+  const { checkoutPortProviders } = await import('../../apps/api/src/wallet/wallet.wiring');
+  const { OrdersModule } = await import('../../apps/api/src/orders/orders.module');
+  const { SOLANA_CHAIN, COMPLIANCE_SCREEN } = await import('../../apps/api/src/wallet/wallet.tokens');
+  const chain = app.get(SOLANA_CHAIN, { strict: false });
+  // Same screen instance the first app resolved (whichever module provides it), so this helper never depends on how that is wired.
+  const screen = app.get(COMPLIANCE_SCREEN, { strict: false });
+  const saved = process.env.WALLET_PREPARED_STORE;
+  if (storeMode) process.env.WALLET_PREPARED_STORE = storeMode;
+  else delete process.env.WALLET_PREPARED_STORE;
+  try {
+    // Its own client and pool, like a freshly started process; closing this app disconnects only this client.
+    const ownPrisma = new PrismaService();
+    @Global()
+    @Module({ providers: [{ provide: PrismaService, useValue: ownPrisma }], exports: [PrismaService] })
+    class RestartPrismaModule {}
+    @Global()
+    @Module({ providers: [{ provide: COMPLIANCE_SCREEN, useValue: screen }], exports: [COMPLIANCE_SCREEN] })
+    class RestartScreenModule {}
+    const moduleRef = await Test.createTestingModule({
+      imports: [RestartPrismaModule, RestartScreenModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers: checkoutPortProviders })],
+    })
+      .overrideProvider(SOLANA_CHAIN).useValue(chain)
+      .compile();
+    const created = moduleRef.createNestApplication({ logger: false });
+    created.setGlobalPrefix('v1');
+    created.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    await created.listen(0, '127.0.0.1');
+    return { app: created, base: (await created.getUrl()).replace('[::1]', '127.0.0.1') };
+  } finally {
+    if (saved === undefined) delete process.env.WALLET_PREPARED_STORE;
+    else process.env.WALLET_PREPARED_STORE = saved;
+  }
+}
+
+async function checkoutCall(apiBase: string, email: string, orderId: string, action: 'prepare' | 'submit' | 'status', body?: unknown) {
+  const res = await fetch(`${apiBase}/v1/wallet/checkout/${orderId}/${action}`, {
+    method: action === 'status' ? 'GET' : 'POST',
+    headers: { 'x-customer-email': email, ...(action === 'status' ? {} : { 'content-type': 'application/json' }) },
+    body: action === 'status' ? undefined : JSON.stringify(body ?? {}),
+  });
+  const json = (await res.json().catch(() => ({}))) as Record<string, any>;
+  return { status: res.status, json };
+}
+
+test('prepared-message store (real DB): prepare, restart the API (new Nest app, same database), submit the signed payload and settle', async () => {
+  const s = await setup('restart', 10_000, 2_500);
+  const prepared = await client.prepareCheckout(s.email, s.orderId);
+  const signed = sign(prepared.unsignedTransactionBase64, s.key);
+
+  // The prepared message is a durable row (namespaced key, kind msg), with the payload as JSON the codec can read back.
+  const stored = await prisma.preparedMessage.findUniqueOrThrow({ where: { key: `msg:${prepared.paymentReference}` } });
+  assert.equal(stored.kind, 'msg');
+  assert.ok(stored.expiresAt.getTime() > Date.now());
+  assert.equal((stored.payload as Record<string, unknown>).amountAtomic, prepared.amountAtomic.toString());
+
+  const restarted = await restartedApp();
+  try {
+    // Nothing prepared in this process: only the database can answer.
+    const submit = await checkoutCall(restarted.base, s.email, s.orderId, 'submit', { signedTransactionBase64: signed });
+    assert.ok([200, 201].includes(submit.status), `submit after restart failed: ${JSON.stringify(submit.json)}`);
+    assert.ok(submit.json.txSignature, 'the restarted API broadcast the customer-signed payload');
+
+    let final = '';
+    for (let i = 0; i < 40 && final !== 'PAID'; i++) {
+      await checkoutCall(restarted.base, s.email, s.orderId, 'status');
+      final = (await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status;
+      if (final !== 'PAID') await sleep(40);
+    }
+    assert.equal(final, 'PAID', 'the order settled through the restarted API');
+    const purchase = await prisma.cryptoTransaction.findFirstOrThrow({ where: { orderId: s.orderId, type: 'PURCHASE' } });
+    assert.equal(purchase.status, 'FINALIZED');
+    assert.equal(purchase.txSignature, submit.json.txSignature);
+  } finally {
+    await restarted.app.close();
+  }
+});
+
+test('prepared-message store (real DB): two live API instances share one store; the in-memory store (explicit, test only) would not survive the same restart', async () => {
+  // Second instance prepares, the FIRST (original) app submits: they are different processes' worth of state.
+  const other = await restartedApp();
+  try {
+    const s = await setup('shared', 10_000, 1_500);
+    const prepared = await checkoutCall(other.base, s.email, s.orderId, 'prepare');
+    assert.ok([200, 201].includes(prepared.status), JSON.stringify(prepared.json));
+    const signed = sign(prepared.json.unsignedTransactionBase64, s.key);
+    const submitted = await checkoutCall(base, s.email, s.orderId, 'submit', { signedTransactionBase64: signed });
+    assert.ok(submitted.json.txSignature, `instance A could not submit what instance B prepared: ${JSON.stringify(submitted.json)}`);
+  } finally {
+    await other.app.close();
+  }
+
+  // Control: with the in-memory store a restart loses the prepared message, and submit fails closed with 409.
+  const memoryA = await restartedApp('memory');
+  const memoryB = await restartedApp('memory');
+  try {
+    const s = await setup('amnesia', 10_000, 1_500);
+    const prepared = await checkoutCall(memoryA.base, s.email, s.orderId, 'prepare');
+    const signed = sign(prepared.json.unsignedTransactionBase64, s.key);
+    const submitted = await checkoutCall(memoryB.base, s.email, s.orderId, 'submit', { signedTransactionBase64: signed });
+    assert.equal(submitted.status, 409, JSON.stringify(submitted.json));
+    assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status, 'PENDING_PAYMENT');
+  } finally {
+    await memoryA.app.close();
+    await memoryB.app.close();
   }
 });

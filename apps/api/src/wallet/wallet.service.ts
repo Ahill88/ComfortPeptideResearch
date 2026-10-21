@@ -1,12 +1,13 @@
-import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PublicKey } from '@solana/web3.js';
 import { PrismaService } from '../prisma.service';
 import { SolanaChain } from './contracts';
 import { findSecretFields } from './secret-fields';
 import { IssuedLinkChallenge, issueLinkChallenge, resolveLinkChallengeKey, verifyLinkProof } from './link-proof';
-import { SOLANA_CHAIN, WALLET_RUNTIME_CONFIG } from './wallet.tokens';
+import { COMPLIANCE_SCREEN, SOLANA_CHAIN, WALLET_RUNTIME_CONFIG } from './wallet.tokens';
+import { type ComplianceScreen, refuseIfSanctioned } from './transfers/compliance-screen';
 import { WalletRuntimeConfig } from './wallet.config';
-import { WALLET_PROVIDER_NAMES, WalletProviderDescriptor, WalletProviderName, describeWalletProvider } from './wallet-providers';
+import { SANDBOX_PROVIDER_REFUSED_MESSAGE, WALLET_PROVIDER_NAMES, WalletProviderDescriptor, WalletProviderName, describeWalletProvider, isSandboxProviderAllowed } from './wallet-providers';
 
 const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -57,6 +58,8 @@ export class WalletService {
     private readonly prisma: PrismaService,
     @Inject(SOLANA_CHAIN) private readonly chain: SolanaChain,
     @Inject(WALLET_RUNTIME_CONFIG) private readonly config: WalletRuntimeConfig,
+    /** Sanctions screen (DI always supplies it; unit tests that build the service by hand may omit it). */
+    @Optional() @Inject(COMPLIANCE_SCREEN) private readonly screen?: ComplianceScreen,
   ) {}
 
   /** Finds the customer for a sandbox identity (creating it on first use). */
@@ -107,6 +110,11 @@ export class WalletService {
       throw new BadRequestException('provider must be "privy" or "sandbox"');
     }
     const descriptor = this.providerDescriptor(provider as WalletProviderName);
+    // Mainnet if EITHER the configuration or the live chain says so.
+    const solanaNetwork = this.chain.network === 'solana-mainnet' ? this.chain.network : this.config.solanaNetwork;
+    if (provider === 'sandbox' && !isSandboxProviderAllowed({ isProductionLike: this.config.isProductionLike, solanaNetwork })) {
+      throw new BadRequestException(SANDBOX_PROVIDER_REFUSED_MESSAGE);
+    }
     if (!descriptor.active) {
       throw new BadRequestException(`Wallet provider "${provider}" is not configured in this deployment`);
     }
@@ -122,6 +130,12 @@ export class WalletService {
     if (!proof.ok) {
       await this.audit(customer.id, 'WALLET_LINK_REJECTED', { address, reason: proof.reason });
       throw new BadRequestException(UNABLE_TO_LINK_MESSAGE);
+    }
+
+    // Sanctions screening of the address being linked (also on a replay: a newly listed address must not keep being "re-linked").
+    if (this.screen) {
+      const verdict = await this.screen.screen({ customerId: customer.id, sourceAddress: address, destinationAddress: address, amountAtomic: 0n, mint: '', surface: 'wallet_link' });
+      await refuseIfSanctioned(verdict, 'wallet_link', (action, detail) => this.audit(customer.id, action, detail));
     }
 
     const existing = await this.prisma.customerWallet.findUnique({ where: { customerId: customer.id } });

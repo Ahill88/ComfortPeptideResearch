@@ -5,7 +5,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { loadMoreOrders } from '../../app/actions/orders';
 import type { AdminOrderSummary } from '../../lib/types';
-import { formatMoney, shortId } from '../console/format';
+import { shortId } from '../console/format';
+import { OrderTotals } from './order-totals';
 import { LocalTime } from '../console/local-time';
 import { StatusChip } from '../console/status-chip';
 
@@ -89,7 +90,7 @@ export function QueueTable({
                   <td className="nowrap"><LocalTime iso={order.createdAt} /></td>
                   <td title={order.customer.name ?? undefined} style={{ overflowWrap: 'anywhere' }}>{order.customer.email}</td>
                   <td className="num">{order.itemCount}</td>
-                  <td className="num nowrap">{formatMoney(order.totalCents, order.currency)}</td>
+                  <td className="num nowrap"><OrderTotals order={order} compact /></td>
                   <td><StatusChip status={order.status} /></td>
                   <td className="mono">{order.trackingNumber ?? '-'}</td>
                 </tr>

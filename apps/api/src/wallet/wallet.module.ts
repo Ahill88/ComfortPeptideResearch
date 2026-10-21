@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 import { createSolanaChain } from './chain/chain.factory';
+import { ChainPreflight } from './chain/chain-preflight';
+import { CHAIN_READINESS_PORT } from './checkout/ports';
+import { NetworkInfoController } from './network-info.controller';
 import { CreditsService } from './credits.service';
 import { loadFeatureFlags, WalletFeatureFlags } from './contracts';
 import { MoonPayOnRampProvider } from './onramp/moonpay-onramp.provider';
@@ -8,7 +11,7 @@ import { MoonPayWebhookController } from './onramp/moonpay-webhook.controller';
 import { MoonPayWebhookService } from './onramp/moonpay-webhook.service';
 import { OnRampService } from './onramp/onramp.service';
 import { OrderTopUpService } from './onramp/order-topup.service';
-import { AllowAllComplianceScreen } from './transfers/compliance-screen';
+import { PrismaService } from '../prisma.service';
 import { createPreparedTransactionStore } from './stores/prepared-store.factory';
 import { TransfersService } from './transfers/transfers.service';
 import { WalletController } from './wallet.controller';
@@ -27,12 +30,12 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
 
 /**
  * User-owned wallet and Research Credits. PrismaService comes from the global PrismaModule.
- * PREPARED_TX_STORE is Redis-backed in production (WALLET_PREPARED_STORE; memory is refused
- * there and is the default only in test/development). COMPLIANCE_SCREEN still allows everything and
- * must be replaced for production.
+ * PREPARED_TX_STORE is Postgres-backed whenever a database is configured (WALLET_PREPARED_STORE=postgres|redis|memory;
+ * memory is refused in production-like runtimes and is the default only in test/development without a database). COMPLIANCE_SCREEN is the sanctions screen from
+ * the global SanctionsModule.
  */
 @Module({
-  controllers: [WalletController, MoonPayWebhookController],
+  controllers: [WalletController, MoonPayWebhookController, NetworkInfoController],
   providers: [
     { provide: WALLET_FEATURE_FLAGS, useFactory: () => loadFeatureFlags() },
     { provide: WALLET_RUNTIME_CONFIG, useFactory: () => loadRuntimeConfig() },
@@ -41,6 +44,13 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
       inject: [WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG],
       useFactory: (flags: WalletFeatureFlags, config: WalletRuntimeConfig) => createSolanaChain(flags, config),
     },
+    // Boot-time chain preflight (genesis hash + USDC mint checks): refuses to start on a definitive failure, degraded while the RPC is unreachable.
+    {
+      provide: ChainPreflight,
+      inject: [WALLET_RUNTIME_CONFIG],
+      useFactory: (config: WalletRuntimeConfig) => new ChainPreflight(config),
+    },
+    { provide: CHAIN_READINESS_PORT, useExisting: ChainPreflight },
     {
       provide: ONRAMP_PROVIDER,
       inject: [WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG],
@@ -49,14 +59,18 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
     // MoonPay buy webhook receiver (POST /v1/webhooks/moonpay): signature-authenticated, updates intent status + audit only.
     { provide: MOONPAY_WEBHOOK_CONFIG, useFactory: () => loadMoonPayWebhookConfig() },
     MoonPayWebhookService,
-    { provide: PREPARED_TX_STORE, useFactory: () => createPreparedTransactionStore() },
-    { provide: COMPLIANCE_SCREEN, useFactory: () => new AllowAllComplianceScreen() },
+    {
+      provide: PREPARED_TX_STORE,
+      inject: [{ token: PrismaService, optional: true }],
+      useFactory: (prisma?: PrismaService) => createPreparedTransactionStore({ prisma }),
+    },
+    // COMPLIANCE_SCREEN comes from the global SanctionsModule (compliance/sanctions): no local allow-all default.
     WalletService,
     CreditsService,
     OnRampService,
     OrderTopUpService,
     TransfersService,
   ],
-  exports: [WalletService, CreditsService, SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG],
+  exports: [WalletService, CreditsService, SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ChainPreflight],
 })
 export class WalletModule {}

@@ -83,3 +83,18 @@ export async function loadMoreOrders(input: { tab: string; q: string; cursor: st
   if (!result.ok) return { ok: false, message: result.message };
   return { ok: true, items: result.data.items, nextCursor: result.data.nextCursor ?? null };
 }
+
+export async function runRefundAction(orderId: string, action: 'request' | 'submit' | 'verify', reason = ''): Promise<OrderActionResult> {
+  const guard = await guardAction('OWNER');
+  if (!guard.ok) return guard;
+  if (!ORDER_ID.test(orderId) || !['request', 'submit', 'verify'].includes(action)) return { ok: false, message: 'Invalid refund action.' };
+  if (action === 'request' && (typeof reason !== 'string' || !reason.trim() || reason.trim().length > 500)) return { ok: false, message: 'Enter a refund reason (1 to 500 characters).' };
+  const path = `/admin/orders/${encodeURIComponent(orderId)}`;
+  const result = await actionApi<AdminOrderDetail>(`${path}/refund${action === 'request' ? '' : `/${action}`}`, {
+    method: 'POST', body: action === 'request' ? { reason: reason.trim() } : {}, timeoutMs: 30000,
+  });
+  if (result.ok) return { ok: true, order: result.data, message: action === 'request' ? 'Refund requested. Review the recorded amount before submitting.' : action === 'submit' ? 'Refund submission checked.' : 'Refund verification checked.' };
+  // Also reconcile ambiguous failures: a timed-out broadcast may have reached the chain.
+  const fresh = await actionApi<AdminOrderDetail>(path);
+  return { ok: false, message: result.message, ...(fresh.ok ? { order: fresh.data } : {}) };
+}

@@ -1,6 +1,7 @@
 import { DynamicModule, Module, type ModuleMetadata, type Provider } from '@nestjs/common';
 import { CheckoutController } from './checkout.controller';
 import { CheckoutService } from './checkout.service';
+import { PrismaService } from '../../prisma.service';
 import { createPreparedMessageStore } from '../stores/prepared-store.factory';
 import {
   BALANCE_PORT,
@@ -36,8 +37,8 @@ import { VerificationService } from './verification.service';
  * `CheckoutModule.register({ imports: [...], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }, ...] })`.
  * (Alternatively import the plain CheckoutModule from a @Global module that exports those tokens.)
  *
- * Provided by this module: PREPARED_MESSAGE_STORE (Redis in production, in-memory in
- * test/development; chosen by WALLET_PREPARED_STORE, see ../stores/prepared-store.factory.ts; production refuses memory) and CHECKOUT_CONFIG (reads env:
+ * Provided by this module: PREPARED_MESSAGE_STORE (Postgres whenever a database is configured; chosen by
+ * WALLET_PREPARED_STORE, see ../stores/prepared-store.factory.ts; production-like runtimes refuse memory) and CHECKOUT_CONFIG (reads env:
  * SOLANA_USDC_TREASURY, optional SOLANA_USDC_MAINNET_MINT, FEE_SPONSORSHIP / FEE_SPONSOR_MIN_LAMPORTS /
  * FEE_SPONSOR_MAX_PER_CUSTOMER_DAY, strictly parsed: a bad value stops the API from starting).
  *
@@ -50,7 +51,11 @@ import { VerificationService } from './verification.service';
     CheckoutService,
     VerificationService,
     ReconciliationService,
-    { provide: PREPARED_MESSAGE_STORE, useFactory: () => createPreparedMessageStore() },
+    {
+      provide: PREPARED_MESSAGE_STORE,
+      inject: [{ token: PrismaService, optional: true }],
+      useFactory: (prisma?: PrismaService) => createPreparedMessageStore({ prisma }),
+    },
     { provide: CHECKOUT_CONFIG, useFactory: () => loadCheckoutConfig() },
   ],
   exports: [CheckoutService, VerificationService, ReconciliationService, PREPARED_MESSAGE_STORE],

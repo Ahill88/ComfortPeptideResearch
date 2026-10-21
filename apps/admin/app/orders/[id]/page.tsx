@@ -20,7 +20,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
   return (
     <Shell auth={auth} active="orders">
       {result.ok ? (
-        <OrderDetail initial={result.data} />
+        <OrderDetail initial={result.data} isOwner={auth.admin.role === 'OWNER'} />
       ) : (
         <div className="panel panel-error" role="alert">
           <h1>Order unavailable</h1>

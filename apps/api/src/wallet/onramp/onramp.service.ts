@@ -1,10 +1,11 @@
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma.service';
 import { OnRampProvider, OnRampQuote, SOLANA_NETWORK_DEVNET, SolanaChain, centsToAtomic } from '../contracts';
 import { SandboxSolanaChain } from '../chain/sandbox-solana-chain';
 import { WalletRuntimeConfig, isSandboxAllowed } from '../wallet.config';
-import { ONRAMP_PROVIDER, SOLANA_CHAIN, WALLET_RUNTIME_CONFIG } from '../wallet.tokens';
+import { COMPLIANCE_SCREEN, ONRAMP_PROVIDER, SOLANA_CHAIN, WALLET_RUNTIME_CONFIG } from '../wallet.tokens';
+import { type ComplianceScreen, refuseIfSanctioned } from '../transfers/compliance-screen';
 import { WalletService } from '../wallet.service';
 import { usdcMintOf } from '../chain/chain.types';
 
@@ -40,6 +41,8 @@ export class OnRampService {
     @Inject(ONRAMP_PROVIDER) private readonly provider: OnRampProvider,
     @Inject(SOLANA_CHAIN) private readonly chain: SolanaChain,
     @Inject(WALLET_RUNTIME_CONFIG) private readonly config: WalletRuntimeConfig,
+    /** Sanctions screen (DI always supplies it; unit tests that build the service by hand may omit it). */
+    @Optional() @Inject(COMPLIANCE_SCREEN) private readonly screen?: ComplianceScreen,
   ) {}
 
   /**
@@ -98,6 +101,11 @@ export class OnRampService {
   }
 
   private async quoteFor(customerId: string, wallet: { address: string }, intentId: string, intendedUsdCents: number, customerIp?: string): Promise<OnRampQuoteView> {
+    // Sanctions screening of the destination (covers new intents and re-quotes): before any provider call.
+    if (this.screen) {
+      const verdict = await this.screen.screen({ customerId, sourceAddress: wallet.address, destinationAddress: wallet.address, amountAtomic: 0n, mint: '', surface: 'onramp' });
+      await refuseIfSanctioned(verdict, 'onramp', (action, detail) => this.wallets.audit(customerId, action, detail));
+    }
     const quote = await this.provider.createQuote({
       customerId,
       destinationAddress: wallet.address,

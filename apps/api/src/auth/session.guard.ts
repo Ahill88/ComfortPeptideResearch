@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, createParamDecorator } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { CUSTOMER_EMAIL_HEADER, resolveHeaderCustomer } from '../wallet/customer-identity';
+import { CUSTOMER_EMAIL_HEADER, resolveHeaderCustomer, resolveRequestIdentity, type IdentityRequest } from '../wallet/customer-identity';
 
 export { CUSTOMER_EMAIL_HEADER };
 
@@ -8,22 +8,20 @@ export { CUSTOMER_EMAIL_HEADER };
 export interface AuthenticatedSession {
   customerId: string;
   email: string;
-  /** Always 'development-identity' today: there is no credential store or server-issued session yet. */
-  source: 'development-identity';
+  /** 'session' = a valid hf_session cookie (any runtime); 'development-identity' = the x-customer-email header (development/test only). */
+  source: 'development-identity' | 'session';
+  /** CustomerSession id; only present when source is 'session'. */
+  sessionId?: string;
 }
 
-type RequestLike = { headers?: Record<string, string | string[] | undefined>; session?: AuthenticatedSession };
+type RequestLike = IdentityRequest & { session?: AuthenticatedSession };
 
 /**
- * Server-side session guard for account routes.
- *
- * There is no credential store, so no server-issued session can exist yet; `validateIssuedSession`
- * is the single seam where one will be verified once login is built. Until then:
- *  - every runtime except exactly NODE_ENV=development|test (production, unset, staging, ...): ALWAYS 401
- *    (fail closed). Client-supplied identity headers are never trusted.
- *  - development/test only: the `x-customer-email` development identity is accepted via the shared
- *    resolver (../wallet/customer-identity), but only for a customer row that already exists. Nothing is
- *    auto-created. This is a restricted development identity, not authentication.
+ * Server-side session guard for account routes, on top of the shared identity resolver (../wallet/customer-identity):
+ *  - a valid `hf_session` cookie (resolved by CustomerSessionMiddleware) works in every runtime; state-changing requests
+ *    identified this way also need an allow-listed Origin (403 otherwise);
+ *  - the `x-customer-email` development identity is accepted ONLY when NODE_ENV is exactly development|test, and only for a
+ *    customer row that already exists. Nothing is auto-created. In every other runtime the header is never read.
  */
 @Injectable()
 export class SessionGuard implements CanActivate {
@@ -31,25 +29,17 @@ export class SessionGuard implements CanActivate {
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestLike>();
-
-    const issued = await this.validateIssuedSession(request);
-    if (issued) {
-      request.session = issued;
+    const identity = resolveRequestIdentity(request);
+    if (identity.source === 'session') {
+      request.session = { customerId: identity.customerId, email: identity.email, source: 'session', sessionId: identity.sessionId };
       return true;
     }
 
-    // Development identity: the shared resolver evaluates the allowlist gate per request (deny by default).
-    const { email, customer } = await resolveHeaderCustomer(request?.headers, (value) =>
+    const { email, customer } = await resolveHeaderCustomer(request.headers, (value) =>
       this.prisma.customer.findUnique({ where: { email: value }, select: { id: true } }),
     );
-
     request.session = { customerId: customer.id, email, source: 'development-identity' };
     return true;
-  }
-
-  /** No session store exists yet, so there is never a valid server-issued session. */
-  protected async validateIssuedSession(_request: RequestLike): Promise<AuthenticatedSession | null> {
-    return null;
   }
 }
 

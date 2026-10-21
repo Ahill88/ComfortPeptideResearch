@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>01/02/2026</Publish_Date>
+    <Record_Count>1</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>900001</uid>
+    <lastName>FIXTURE ENTITY ALPHA</lastName>
+    <sdnType>Entity</sdnType>
+  </sdnEntry>
+</sdnList>

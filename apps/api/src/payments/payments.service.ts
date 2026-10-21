@@ -32,6 +32,7 @@ export class PaymentsService {
     if (order.status !== 'PENDING_PAYMENT') {
       throw new ConflictException('Order is not awaiting payment');
     }
+    this.legacyUsdcMint(); // refuses outright when the deployment is configured for any network but devnet
     const destination = this.solanaDestination();
 
     const existing = await this.prisma.payment.findUnique({ where: { orderId } });
@@ -122,7 +123,7 @@ export class PaymentsService {
       paymentId: payment.id,
       network: 'solana-devnet',
       asset: 'USDC',
-      mint: SOLANA_DEVNET_USDC_MINT,
+      mint: this.legacyUsdcMint(),
       amountAtomic: payment.amountAtomic,
       recipient: payment.walletAddress,
       reference: payment.id,
@@ -151,6 +152,20 @@ export class PaymentsService {
       throw new ConflictException('Payment intent is no longer payable');
     }
     return this.intentResponse(payment);
+  }
+
+  /**
+   * LEGACY, DISABLED PATH (the confirmation processor never settles; real payments are wallet checkout, docs/wallet/*). Its intents
+   * are devnet-only by construction, so it must never describe a non-devnet configuration with the hard-coded devnet mint: for
+   * any SOLANA_NETWORK other than solana-devnet it refuses (503). On devnet it uses the configured SOLANA_USDC_MINT, falling back
+   * to the built-in devnet mint only when unset (the same rule as the wallet stack's config).
+   */
+  private legacyUsdcMint(): string {
+    const network = process.env.SOLANA_NETWORK?.trim() || 'solana-devnet';
+    if (network !== 'solana-devnet') {
+      throw new ServiceUnavailableException('The legacy payment intent path supports Solana devnet only and is disabled for this network; use wallet checkout');
+    }
+    return process.env.SOLANA_USDC_MINT?.trim() || SOLANA_DEVNET_USDC_MINT;
   }
 
   private solanaDestination(): string {

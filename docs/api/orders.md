@@ -3,7 +3,11 @@
 `POST /v1/orders` creates an order from active products and released lots. Prices always come from the database,
 never from the client; all money is integer USD cents.
 
-## Authentication: NOT SOLVED
+> **Updated (commerce round 2):** order creation now reserves stock, stores `subtotalCents`/`shippingCents`/`taxCents`, can return
+> `409 OUT_OF_STOCK`, honours a signed-in customer and answers `401` without an identity in production-like runtimes. See
+> `docs/api/inventory-and-totals.md`. The paragraphs below describe the anonymous development/test flow, which is unchanged.
+
+## Authentication: NOT SOLVED (development/test anonymous flow)
 
 **This route is not authenticated.** There is no real authentication yet (see `docs/security` and the README "API auth"
 row). The customer is identified only by the `email` in the request body, so any caller can create an order for, or
@@ -46,8 +50,8 @@ Limits (violations are `400`, never `500`):
 
 ## Response
 
-`201` with the order: `id`, `customerId`, `status`, `totalCents`, `currency`, `researchAcknowledgedAt`, `createdAt`,
-`items[]`. `id` is a **server-generated cuid**. It is not the idempotency key, and the key is never echoed back.
+`201` with the order: `id`, `customerId`, `status`, `subtotalCents`, `shippingCents`, `taxCents`, `totalCents`, `currency`,
+`researchAcknowledgedAt`, `createdAt`, `items[]`. `id` is a **server-generated cuid**. It is not the idempotency key, and the key is never echoed back.
 Wallet checkout and the storefront use the returned `id`; they must not assume it equals the key they sent.
 
 ## Idempotency

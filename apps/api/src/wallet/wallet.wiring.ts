@@ -1,8 +1,9 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
+import { ChainPreflight } from './chain/chain-preflight';
 import { SANDBOX_SPONSOR_LAMPORTS, SandboxFeePayerSigner } from './chain/sandbox-fee-payer-signer';
 import { SandboxSolanaChain } from './chain/sandbox-solana-chain';
-import { BALANCE_PORT, CHAIN_PORT, FEE_PAYER_SIGNER, FULFILLMENT_PORT, WALLET_FLAGS, WALLET_LOOKUP_PORT } from './checkout/ports';
+import { BALANCE_PORT, CHAIN_PORT, CHAIN_READINESS_PORT, FEE_PAYER_SIGNER, FULFILLMENT_PORT, WALLET_FLAGS, WALLET_LOOKUP_PORT } from './checkout/ports';
 import type { BalancePort, FeePayerSigner, FulfillmentTrigger, WalletLookupPort } from './checkout/ports';
 import { ReconciliationService } from './checkout/reconciliation.service';
 import { CreditsService } from './credits.service';
@@ -30,6 +31,8 @@ export function createSandboxFeePayerSigner(chain: unknown, config: WalletRuntim
 export const checkoutPortProviders = [
   { provide: CHAIN_PORT, useExisting: SOLANA_CHAIN },
   { provide: WALLET_FLAGS, useExisting: WALLET_FEATURE_FLAGS },
+  // The boot-time chain preflight (provided and exported by WalletModule): checkout refuses to prepare/submit until it has passed.
+  { provide: CHAIN_READINESS_PORT, useExisting: ChainPreflight },
   {
     provide: FEE_PAYER_SIGNER,
     inject: [SOLANA_CHAIN, WALLET_RUNTIME_CONFIG],

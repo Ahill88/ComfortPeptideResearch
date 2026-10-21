@@ -194,7 +194,8 @@ test('full lifecycle PAID -> PROCESSING -> SHIPPED -> DELIVERED: events, shipmen
     { ...first.body.items[0], id: undefined },
     { id: undefined, productId: product.id, sku: `SKU-${tag}`, name: `Peptide ${tag}`, lotCode, quantity: 2, unitCents: 1250 },
   );
-  assert.deepEqual(first.body.allowedActions, ['start-packing', 'add-note']);
+  assert.deepEqual(first.body.allowedActions, ['start-packing', 'refund', 'add-note']);
+  assert.equal(first.body.refund, null);
   assert.ok(!JSON.stringify(first.body).includes(walletAddress), 'wallet addresses are never exposed');
   assert.ok(!JSON.stringify(first.body).includes('TREASURY-'));
 
@@ -376,7 +377,7 @@ test('list: summary shape, status filter, email substring and id prefix search (
   assert.equal(alices.body.nextCursor, null);
   const summary = alices.body.items.find((item: any) => item.id === a1.id);
   assert.deepEqual(summary, {
-    id: a1.id, status: 'PAID', totalCents: 2500, currency: 'USD', createdAt: a1.createdAt.toISOString(),
+    id: a1.id, status: 'PAID', subtotalCents: null, shippingCents: 0, taxCents: 0, totalCents: 2500, currency: 'USD', createdAt: a1.createdAt.toISOString(),
     customer: { id: alice.id, email: `${tag}-alice@example.test`, name: 'Alice' }, itemCount: 5, hasShipment: false, trackingNumber: null,
   });
   assert.ok(!('shippingAddress' in summary));

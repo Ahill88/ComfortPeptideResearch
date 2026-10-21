@@ -56,7 +56,8 @@ export interface CorsConfig {
   methods: string[];
   allowedHeaders: string[];
   exposedHeaders: string[];
-  credentials: false;
+  /** Browsers send the hf_session cookie with credentials:'include'; allowed ONLY for the exact origins above (never with a wildcard). */
+  credentials: true;
   maxAge: number;
 }
 
@@ -67,7 +68,7 @@ export function buildCorsOptions(env: EnvLike): CorsConfig {
     methods: CORS_METHODS,
     allowedHeaders: CORS_ALLOWED_HEADERS,
     exposedHeaders: CORS_EXPOSED_HEADERS,
-    credentials: false,
+    credentials: true,
     maxAge: 600,
   };
 }

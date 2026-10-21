@@ -43,6 +43,13 @@ const SCRATCH_SCHEMA_SUITES = new Map([
   ['coa-admin.integration.test.ts', 'it_coa'],
   ['coa-public.integration.test.ts', 'it_coa'],
   ['anchor-db.integration.test.ts', 'it_coa'],
+  ['customer-auth.integration.test.ts', 'it_auth'],
+  ['sanctions.integration.test.ts', 'it_sanc'],
+  ['email.integration.test.ts', 'it_email'],
+  ['customer-orders.integration.test.ts', 'it_orders2'],
+  ['credits-network.integration.test.ts', 'it_net'],
+  ['postgres-prepared-stores.integration.test.ts', 'it_store'],
+  ['admin-order-refund.integration.test.ts', 'it_refund'],
 ]);
 function scratchEnv(file) {
   const name = [...SCRATCH_SCHEMA_SUITES].find(([suffix]) => file.endsWith(suffix))?.[1];

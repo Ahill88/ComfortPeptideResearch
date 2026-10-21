@@ -1,5 +1,5 @@
 /**
- * Browser client for the wallet API. Sandbox identity is the x-customer-email header.
+ * Browser client for the wallet API. Browser identity comes from the httpOnly session cookie.
  * Private keys are never an input to any function in this file.
  * All bigint values cross the wire as decimal STRINGS.
  */
@@ -20,7 +20,13 @@ type RequestOptions = { method?: 'GET' | 'POST'; email?: string | null; body?: u
 
 export async function apiRequest<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json', ...options.headers };
-  if (options.email) headers['x-customer-email'] = options.email;
+  // Node/test callers explicitly passing email retain the dev/test identity seam used by wallet e2e.
+  // Browsers always use cookie identity, even if a legacy caller passes email or supplies the header.
+  if (typeof window === 'undefined') {
+    if (options.email) headers['x-customer-email'] = options.email;
+  } else {
+    for (const key of Object.keys(headers)) if (key.toLowerCase() === 'x-customer-email') delete headers[key];
+  }
   if (options.body !== undefined) headers['Content-Type'] = 'application/json';
   let response: Response;
   try {
@@ -30,6 +36,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: options.signal,
       cache: 'no-store',
+      credentials: 'include',
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === 'AbortError') throw error;

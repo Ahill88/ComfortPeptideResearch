@@ -79,16 +79,37 @@ export class CreditsService {
       };
     }
 
+    // A wallet linked under another network (e.g. a devnet sandbox key after a switch to mainnet) is not spendable here: the same
+    // address on another cluster is a different, unrelated balance. Checkout 409s on the same mismatch.
+    if (wallet.network !== this.chain.network) {
+      return {
+        ...base,
+        hasWallet: true,
+        walletAddress: wallet.address,
+        finalizedAtomic: 0n,
+        pendingOutgoingAtomic: 0n,
+        activeReservationsAtomic: 0n,
+        spendableAtomic: 0n,
+        researchCredits: 0n,
+        stale: false,
+        notice: 'Your linked wallet was linked on a different network than this deployment uses; link a wallet for this network before spending.',
+      };
+    }
+
+    // Only rows of THIS chain's network count: a pending transfer or reservation made on another network (devnet rows left over
+    // after a switch to mainnet, or the reverse) must never reduce, or inflate, what is spendable here.
     const pendingRows = await this.prisma.cryptoTransaction.findMany({
       where: {
         customerId,
+        network: this.chain.network,
         type: { in: ['WITHDRAWAL', 'PURCHASE'] },
         status: { in: ['SUBMITTED', 'CONFIRMED'] },
       },
     });
-    const reservationRows = await this.prisma.creditReservation.findMany({
-      where: { customerId, status: 'ACTIVE', expiresAt: { gt: asOf } },
-    });
+    const reservationRows = await this.reservationsOnThisNetwork(
+      customerId,
+      await this.prisma.creditReservation.findMany({ where: { customerId, status: 'ACTIVE', expiresAt: { gt: asOf } } }),
+    );
 
     let finalizedAtomic: bigint;
     let pending: typeof pendingRows;
@@ -141,6 +162,22 @@ export class CreditsService {
       researchCredits: spendable.researchCredits,
       stale: false,
     };
+  }
+
+  /**
+   * CreditReservation has no network column; a reservation belongs to the network of its order's LATEST purchase row (checkout
+   * creates both together). A reservation that has no purchase row at all cannot be attributed to a network and is kept: counting
+   * it can only lower spendable, which is the safe direction.
+   */
+  private async reservationsOnThisNetwork<T extends { orderId: string }>(customerId: string, reservations: T[]): Promise<T[]> {
+    if (reservations.length === 0) return reservations;
+    const purchases = await this.prisma.cryptoTransaction.findMany({
+      where: { customerId, type: 'PURCHASE', orderId: { in: reservations.map((r) => r.orderId) } },
+      orderBy: { createdAt: 'desc' },
+    });
+    const latestNetwork = new Map<string, string>();
+    for (const row of purchases) if (row.orderId && !latestNetwork.has(row.orderId)) latestNetwork.set(row.orderId, row.network);
+    return reservations.filter((r) => (latestNetwork.get(r.orderId) ?? this.chain.network) === this.chain.network);
   }
 
   /**

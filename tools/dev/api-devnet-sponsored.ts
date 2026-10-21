@@ -19,10 +19,17 @@
  * with devnet SOL, see docs/api/coa-anchoring.md) binds COA_PUBLISHER_SIGNER the same way, so publishing a COA writes a real memo to
  * devnet. Requires COA_ANCHOR_ENABLED=true in .env, COA_ANCHOR_NETWORK unset or solana-devnet and a devnet COA_ANCHOR_RPC_URL (or none).
  * Unset => no publisher is bound, anchors stay PENDING with an error, and a note is printed. The same safety checks apply.
+ *
+ * OPTIONAL, refunds: DEV_TREASURY_KEYPAIR_FILE=/path/to/dev-treasury.json (a throwaway devnet key that is the merchant treasury: the public key
+ * MUST equal SOLANA_USDC_TREASURY in .env, otherwise the launcher refuses; it must differ from the sponsor and COA keys) binds MERCHANT_SIGNER
+ * (tools/dev/dev-treasury-signer.ts) so POST /v1/admin/orders/:id/refund/submit really pays the customer back on devnet. The signer applies its own
+ * policy (one USDC transferChecked, treasury -> the customer's USDC account, the approved amount) and refuses anything else. Unset => no signer is
+ * bound and refund submit answers 503 "Refund signing is not available." (production behaviour). See docs/api/admin-refunds.md.
  */
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createDevTreasurySigner, readDevKeypair, type DevMerchantSigner } from './dev-treasury-signer';
 
 const apiRequire = createRequire(path.join(__dirname, '../../apps/api/package.json'));
 const { Keypair } = apiRequire('@solana/web3.js') as typeof import('@solana/web3.js');
@@ -78,10 +85,30 @@ async function main() {
     console.log('Note: DEV_COA_PUBLISHER_KEYPAIR_FILE is not set; no COA publisher is bound, so COA anchors will stay PENDING ("no publisher signer is bound").');
   }
 
+  // Optional: the dev treasury key (merchant side) so refunds can be submitted on devnet. Never the fee-payer or COA key.
+  let merchantSigner: DevMerchantSigner | undefined;
+  let merchantTreasury = '';
+  const treasuryKeyFile = process.env.DEV_TREASURY_KEYPAIR_FILE?.trim();
+  if (treasuryKeyFile) {
+    const treasury = readDevKeypair(treasuryKeyFile);
+    merchantTreasury = treasury.publicKey.toBase58();
+    const configured = process.env.SOLANA_USDC_TREASURY?.trim();
+    if (!configured) fail('DEV_TREASURY_KEYPAIR_FILE is set, so SOLANA_USDC_TREASURY must be set in .env to that key\'s public key.');
+    if (configured !== merchantTreasury) {
+      fail(`SOLANA_USDC_TREASURY (${configured}) is not the public key of DEV_TREASURY_KEYPAIR_FILE (${merchantTreasury}). Refunds are paid from the treasury, so set SOLANA_USDC_TREASURY to ${merchantTreasury} or unset DEV_TREASURY_KEYPAIR_FILE.`);
+    }
+    if (treasury.publicKey.equals(sponsor.publicKey)) fail('DEV_TREASURY_KEYPAIR_FILE must be a different key than DEV_SPONSOR_KEYPAIR_FILE.');
+    if (coaPublisherSigner && coaPublisherSigner.publicKey === merchantTreasury) fail('DEV_TREASURY_KEYPAIR_FILE must be a different key than DEV_COA_PUBLISHER_KEYPAIR_FILE.');
+    merchantSigner = createDevTreasurySigner(treasury);
+  } else {
+    console.log('Note: DEV_TREASURY_KEYPAIR_FILE is not set; no MERCHANT_SIGNER is bound, so refund submit answers 503 "Refund signing is not available."');
+  }
+
   const { Logger, ValidationPipe } = await import('@nestjs/common');
   const { Test } = await import('@nestjs/testing');
   const { AppModule } = await import('../../apps/api/src/app.module');
   const { FEE_PAYER_SIGNER } = await import('../../apps/api/src/wallet/checkout/ports');
+  const { MERCHANT_SIGNER } = await import('../../apps/api/src/wallet/refunds/merchant-signer.port');
   const { COA_PUBLISHER_SIGNER } = await import('../../apps/api/src/coa/anchor/coa-publisher-signer.port');
   const { configureApp } = await import('../../apps/api/src/config/configure-app');
   const { assertValidEnv } = await import('../../apps/api/src/config/env.validation');
@@ -92,6 +119,7 @@ async function main() {
 
   const builder = Test.createTestingModule({ imports: [AppModule] }).overrideProvider(FEE_PAYER_SIGNER).useValue(feePayerSigner);
   if (coaPublisherSigner) builder.overrideProvider(COA_PUBLISHER_SIGNER).useValue(coaPublisherSigner);
+  if (merchantSigner) builder.overrideProvider(MERCHANT_SIGNER).useValue(merchantSigner);
   const moduleRef = await builder.compile();
   const app = moduleRef.createNestApplication<import('@nestjs/platform-express').NestExpressApplication>();
   app.setGlobalPrefix('v1', { exclude: HEALTH_PREFIX_EXCLUDE });
@@ -101,6 +129,7 @@ async function main() {
   await app.listen(port);
   // console, not Nest's Logger: the testing harness silences Nest logs below error level.
   console.log(`API listening on :${port} on Solana devnet; network fees are paid by the dev sponsor ${feePayerSigner.publicKey}`);
+  if (merchantSigner) console.log(`Refunds are paid on devnet from the dev treasury ${merchantTreasury} (fund it with devnet USDC and SOL: docs/api/admin-refunds.md)`);
   if (coaPublisherSigner) console.log(`COA anchors are written to devnet by the dev publisher ${coaPublisherSigner.publicKey} (fund it with devnet SOL: docs/api/coa-anchoring.md)`);
 }
 

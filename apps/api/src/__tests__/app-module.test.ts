@@ -84,7 +84,8 @@ test('the full AppModule graph resolves: RefundsService gets the wallet chain th
   const refunds = app.get(RefundsService);
   assert.ok(refunds);
   assert.equal(app.get(CHAIN_PORT, { strict: false }), app.get(SOLANA_CHAIN, { strict: false }), 'CHAIN_PORT is an alias of SOLANA_CHAIN');
-  assert.throws(() => app.get(MERCHANT_SIGNER, { strict: false }), 'no MERCHANT_SIGNER may be bound anywhere in AppModule');
+  // The token exists only so the dev launcher can override it (like COA_PUBLISHER_SIGNER); its default binding is "nothing".
+  assert.equal(app.get(MERCHANT_SIGNER, { strict: false }), undefined, 'no MERCHANT_SIGNER implementation may be bound anywhere in AppModule');
   assert.equal((refunds as unknown as { signer: unknown }).signer, undefined);
 });
 

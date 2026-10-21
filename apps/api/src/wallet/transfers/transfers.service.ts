@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import {
@@ -16,14 +17,15 @@ import {
 import { PublicKey, Transaction } from '@solana/web3.js';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma.service';
-import { ChainUnavailableError, SolanaChain, USDC_DECIMALS } from '../contracts';
+import { CHAIN_READINESS_PORT, type ChainReadinessPort } from '../checkout/ports';
+import { ChainUnavailableError, SolanaChain, USDC_DECIMALS, type WalletFeatureFlags } from '../contracts';
 import { base58Encode } from '../chain/base58';
 import { ChainRejectedError } from '../chain/chain-errors';
 import { TOKEN_ACCOUNT_RENT_LAMPORTS, WalletChain, usdcMintOf } from '../chain/chain.types';
 import { CreditsService } from '../credits.service';
 import { parseDestinationAddress, WalletService } from '../wallet.service';
-import { COMPLIANCE_SCREEN, PREPARED_TX_STORE, SOLANA_CHAIN } from '../wallet.tokens';
-import { ComplianceScreen } from './compliance-screen';
+import { COMPLIANCE_SCREEN, PREPARED_TX_STORE, SOLANA_CHAIN, WALLET_FEATURE_FLAGS } from '../wallet.tokens';
+import { ComplianceScreen, refuseIfSanctioned } from './compliance-screen';
 import { PreparedTransactionStore } from './prepared-transaction.store';
 
 export const PREPARED_TTL_MS = 5 * 60_000;
@@ -89,10 +91,35 @@ export class TransfersService {
     @Inject(SOLANA_CHAIN) private readonly chain: SolanaChain,
     @Inject(PREPARED_TX_STORE) private readonly store: PreparedTransactionStore,
     @Inject(COMPLIANCE_SCREEN) private readonly compliance: ComplianceScreen,
+    /**
+     * Optional so older call sites still construct, but fail closed: with no flags a MAINNET chain refuses every transfer.
+     * Devnet/sandbox never need them.
+     */
+    @Optional() @Inject(WALLET_FEATURE_FLAGS) private readonly flags: WalletFeatureFlags | undefined = undefined,
+    /** Optional: the boot-time chain preflight; bound and not ready means transfers are refused with 503. */
+    @Optional() @Inject(CHAIN_READINESS_PORT) private readonly readiness: ChainReadinessPort | undefined = undefined,
   ) {}
+
+  /**
+   * External USDC sends on mainnet are real money: they need BOTH ENABLE_SOLANA_MAINNET and ENABLE_LIVE_CRYPTO_PAYMENTS (the
+   * mainnet flag alone only lets the adapter exist), and the chain preflight must have passed. Runs on prepare AND submit.
+   */
+  private assertTransfersAllowed(): void {
+    if (this.chain.network === 'solana-mainnet') {
+      if (!this.flags?.enableSolanaMainnet) throw new ConflictException('Solana mainnet is disabled');
+      if (!this.flags.enableLiveCryptoPayments) throw new ConflictException('Live crypto payments are disabled');
+    } else if (this.chain.network !== 'solana-devnet') {
+      throw new ConflictException('Unsupported Solana network');
+    }
+    if (this.readiness && !this.readiness.isReady()) {
+      this.logger.error(`Transfers refused: chain preflight has not passed (${this.readiness.reason()})`);
+      throw new ServiceUnavailableException('Transfers are temporarily unavailable: the Solana network check has not passed');
+    }
+  }
 
   /** Builds an UNSIGNED legacy transaction for the customer's wallet to sign. Nothing is signed or sent here. */
   async prepare(customerId: string, input: PrepareTransferInput): Promise<PreparedTransfer> {
+    this.assertTransfersAllowed();
     const wallet = await this.prisma.customerWallet.findUnique({ where: { customerId } });
     if (!wallet) throw new ConflictException('Link a wallet before sending');
     const destination = parseDestinationAddress(input.destination);
@@ -120,7 +147,9 @@ export class TransfersService {
       destinationAddress: destination.toBase58(),
       amountAtomic: amount,
       mint,
+      surface: 'transfer',
     });
+    await refuseIfSanctioned(verdict, 'transfer', (action, detail) => this.wallets.audit(customerId, action, detail));
     if (!verdict.allowed) {
       await this.wallets.audit(customerId, 'WITHDRAWAL_SCREENING_BLOCKED', { destination: destination.toBase58(), reason: verdict.reason ?? null });
       throw new ForbiddenException('This transfer cannot be processed');
@@ -230,6 +259,7 @@ export class TransfersService {
    * wallet over exactly the prepared message. The platform has no signing code path.
    */
   async submit(customerId: string, transactionId: string, signedTransactionBase64: unknown): Promise<TransferView> {
+    this.assertTransfersAllowed();
     const row = await this.prisma.cryptoTransaction.findUnique({ where: { id: transactionId } });
     if (!row || row.customerId !== customerId || row.type !== 'WITHDRAWAL') throw new NotFoundException('Transfer not found');
 

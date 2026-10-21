@@ -172,6 +172,8 @@ export async function bootHarness(label: string): Promise<Harness> {
       await prisma.coaFile.deleteMany({ where: { coaId: { in: coaIds } } });
       await prisma.coa.deleteMany({ where: { id: { in: coaIds } } });
       await prisma.orderItem.deleteMany({ where: { orderId: { in: orders.map((order) => order.id) } } });
+      // POST /v1/orders now reserves stock: the ledger rows reference the product.
+      await prisma.inventoryAdjustment.deleteMany({ where: { productId: { in: track.products } } });
       await prisma.order.deleteMany({ where: { id: { in: orders.map((order) => order.id) } } });
       await prisma.customer.deleteMany({ where: { id: { in: customerIds } } });
       await prisma.lot.deleteMany({ where: { id: { in: lotIds } } });

@@ -3,13 +3,16 @@ import Link from 'next/link';
 import type { Authed } from '../../lib/server/session';
 import { signOut } from '../../app/actions/auth';
 
-export type NavKey = 'overview' | 'orders' | 'lots' | 'products' | 'wallets' | 'team' | 'audit' | 'account';
+export type NavKey = 'overview' | 'orders' | 'lots' | 'products' | 'inventory' | 'compliance' | 'email' | 'wallets' | 'team' | 'audit' | 'account';
 
 const NAV: Array<{ key: NavKey; href: string; label: string; owner?: boolean }> = [
   { key: 'overview', href: '/', label: 'Overview' },
   { key: 'orders', href: '/orders', label: 'Orders' },
   { key: 'lots', href: '/lots', label: 'Lots & COAs' },
   { key: 'products', href: '/products', label: 'Products' },
+  { key: 'inventory', href: '/inventory', label: 'Inventory' },
+  { key: 'compliance', href: '/compliance', label: 'Compliance' },
+  { key: 'email', href: '/email', label: 'Email outbox', owner: true },
   { key: 'wallets', href: '/wallets', label: 'Wallets' },
   { key: 'team', href: '/team', label: 'Team', owner: true },
   { key: 'audit', href: '/audit', label: 'Audit log', owner: true },

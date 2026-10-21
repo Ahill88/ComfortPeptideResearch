@@ -47,18 +47,17 @@ Verify against MoonPay's current docs before `ENABLE_REAL_MOONPAY` is switched o
 
 | Network | USDC mint | State |
 |---|---|---|
-| Devnet | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | In code in four places: `apps/api/src/wallet/contracts.ts` (`USDC_DEVNET_MINT`, also used by checkout and verification), `packages/solana-sdk/src/index.ts`, `apps/api/src/payments/payments.service.ts`, `apps/storefront/lib/wallet/tx.ts` |
-| Mainnet | Not configured | Must be confirmed from Circle's official documentation before use. It is deliberately not written in this repo. |
+| Devnet | `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` | The built-in devnet fallback (`USDC_DEVNET_MINT` in `apps/api/src/wallet/contracts.ts`), used only when `SOLANA_USDC_MINT` is unset on devnet; at runtime every API path reads `chain.usdcMint`. Still literals elsewhere: `packages/solana-sdk/src/index.ts` (dead, devnet-typed), the legacy `apps/api/src/payments/payments.service.ts` fallback (refuses non-devnet) and `apps/storefront/lib/wallet/tx.ts` |
+| Mainnet | Not configured | Must be confirmed from Circle's official documentation before use and recorded in `SOLANA_USDC_MINT` (required on mainnet). It is deliberately not written in this repo. |
 
-Mainnet status in code: guarded and **not usable**.
-- `DevnetSolanaChain` (`apps/api/src/wallet/chain/devnet-solana-chain.ts`, the only RPC adapter regardless of its name) refuses mainnet unless `ENABLE_SOLANA_MAINNET=true`, and then also requires an explicit mint (`SOLANA_USDC_MINT`). It also refuses a mainnet-looking RPC URL while `SOLANA_NETWORK` is devnet.
-- Checkout reads a **different** variable, `SOLANA_USDC_MAINNET_MINT` (`apps/api/src/wallet/checkout/ports.ts`; not in `.env.example`), and mainnet checkout also needs `ENABLE_LIVE_CRYPTO_PAYMENTS`.
-- `VerificationService.expectedMint` returns a mint only for devnet, so any mainnet purchase would fail verification as `wrong mint`. The storefront also refuses non-devnet networks.
+Mainnet status in code: switchable by configuration behind loud startup checks, and **not ready for real money** (`mainnet-readiness.md` has the switches, the checklist and the open items).
+- `DevnetSolanaChain` (`apps/api/src/wallet/chain/devnet-solana-chain.ts`, the only RPC adapter regardless of its name) refuses mainnet unless `ENABLE_SOLANA_MAINNET=true`, and then also requires an explicit mint (`SOLANA_USDC_MINT`) and an explicit non-devnet RPC URL. It also refuses a mainnet-looking RPC URL while `SOLANA_NETWORK` is devnet.
+- The mint is one variable now: `SOLANA_USDC_MINT` becomes `chain.usdcMint`, read by checkout, verification, refunds, balances, transfers and the on-ramp. `SOLANA_USDC_MAINNET_MINT` is deprecated and ignored (startup warning). Mainnet checkout and transfers also need `ENABLE_LIVE_CRYPTO_PAYMENTS`. The storefront still refuses non-devnet networks until it reads `GET /v1/public/network-info`.
 - `tests/wallet/custody-invariants.test.ts` fails if any source contains a mainnet RPC URL literal.
 
 Checklist for `ENABLE_SOLANA_MAINNET`:
 - [ ] Confirm the mainnet mint from Circle's official documentation, record the source and date, and add it as explicit configuration (not a code literal copied from a third-party site).
-- [ ] Replace the four devnet constants above with one configured source of truth, unify `SOLANA_USDC_MINT` and `SOLANA_USDC_MAINNET_MINT`, and make `VerificationService.expectedMint` use the network's configured mint.
+- [x] One configured source of truth for the mint: `SOLANA_USDC_MINT` -> `chain.usdcMint`, used by verification too (`expectedMint` derives from the chain). The storefront literal in `lib/wallet/tx.ts` remains and is the front-end engineers' to replace with `network-info`.
 - [ ] Choose and contract a production RPC provider. Public endpoints are not for production. RPC outage must fail closed (it does in code; `DevnetSolanaChain` success paths are untested).
 - [ ] Set `SOLANA_USDC_TREASURY` to a mainnet treasury address whose key is held per the KMS/HSM design in `architecture.md`, and make sure its USDC token account exists (checkout does not create it).
 - [ ] Run the whole flow on a **real** devnet cluster first. It has never been done; `DevnetSolanaChain` has only been tested against a fake `Connection`.
@@ -85,8 +84,8 @@ A Solana transfer needs SOL for network fees (and possibly for creating a recipi
 | `WALLET_LINK_CHALLENGE_KEY` | API (`wallet/link-proof.ts`) | In `.env.example`, blank; >= 32 chars required outside development/test |
 | `ELIGIBILITY_REQUIRED` | API (`checkout.service.ts`) | In `.env.example` as `true`; `false` honored only in development/test |
 | Five `ENABLE_*` flags | API (`contracts.ts`) | In `.env.example`, all `false` |
-| `WALLET_CHAIN_MODE`, `SOLANA_NETWORK`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT` | API (`wallet.config.ts`) | In `.env.example` (`sandbox`, `solana-devnet`, devnet URL, blank) |
-| `SOLANA_USDC_MAINNET_MINT` | API checkout only (`checkout/ports.ts`) | **Not** in `.env.example` |
+| `WALLET_CHAIN_MODE`, `SOLANA_NETWORK`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT` | API (`wallet.config.ts`, validated by `config/env.validation.ts`) | In `.env.example` (`sandbox`, `solana-devnet`, devnet URL, blank). Mainnet requires an explicit RPC URL and mint |
+| `SOLANA_USDC_MAINNET_MINT` | Nothing (deprecated) | **Ignored**; startup warns if it is set and differs from `SOLANA_USDC_MINT`. Not in `.env.example` |
 | `FEE_SPONSORSHIP` | API checkout (`checkout/fee-sponsorship.ts`, read by `loadCheckoutConfig`) | In `.env.example` (`false`). Exact string `true` enables; unset/blank/`false` is off; any other value stops the API from starting. Needs a bound `FEE_PAYER_SIGNER`, otherwise it has no effect and a startup warning is logged. |
 | `FEE_SPONSOR_MIN_LAMPORTS` | same | In `.env.example` (`50000000`, 0.05 SOL). Whole lamports 1 to 10^15; sponsor balance below it (or below two signatures' fees) means fallback to customer-pays. Malformed values stop the API from starting. |
 | `FEE_SPONSOR_MAX_PER_CUSTOMER_DAY` | same | In `.env.example` (`20`). Whole number 1 to 10000, counted from `CHECKOUT_FEE_SPONSORED` audit events in the last 24 hours (no schema change); at the cap checkout falls back to customer-pays. Malformed values stop the API from starting. |

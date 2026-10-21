@@ -1,6 +1,9 @@
-import { Inject, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { PrismaService } from '../../prisma.service';
-import { ChainUnavailableError, USDC_DEVNET_MINT, centsToAtomic } from '../contracts';
+import { EMAIL_PORT, type EmailPort } from '../../email/email.types';
+import { runOrderEmailHook } from '../../orders/customer-orders.email-hook';
+import { usdcMintOrNull } from '../chain/chain.types';
+import { ChainUnavailableError, centsToAtomic } from '../contracts';
 import {
   CHAIN_PORT,
   FULFILLMENT_PORT,
@@ -52,6 +55,7 @@ export class VerificationService {
     @Inject(CHAIN_PORT) private readonly chain: ChainPort,
     @Inject(WALLET_FLAGS) private readonly flags: WalletFlagsPort,
     @Inject(FULFILLMENT_PORT) private readonly fulfillment: FulfillmentTrigger,
+    @Optional() @Inject(EMAIL_PORT) private readonly email?: EmailPort,
   ) {}
 
   async verifyAndSettle(input: { paymentReference?: string; signature?: string }): Promise<VerifyResult> {
@@ -99,7 +103,7 @@ export class VerificationService {
     const reasons: string[] = [];
     if (transfer.network !== row.network || transfer.network !== this.chain.network) reasons.push('network mismatch');
     if (transfer.signature !== row.txSignature) reasons.push('signature mismatch');
-    if (transfer.mint !== row.mint || row.mint !== this.expectedMint(row.network)) reasons.push('wrong mint');
+    if (transfer.mint !== row.mint || row.mint !== this.expectedMint()) reasons.push('wrong mint');
     if (transfer.sourceOwner !== row.sourceAddress) reasons.push('wrong source owner');
     if (transfer.destinationOwner !== row.destinationAddress) reasons.push('wrong destination owner');
     if (row.amountAtomic !== expectedAmount) reasons.push('order total changed since prepare');
@@ -111,8 +115,13 @@ export class VerificationService {
     return this.settle(row, expectedAmount);
   }
 
-  private expectedMint(network: string): string | undefined {
-    return network === 'solana-devnet' ? USDC_DEVNET_MINT : undefined;
+  /**
+   * The mint a settled payment must have used: the chain's configured USDC mint (env SOLANA_USDC_MINT), on whichever network the
+   * chain serves. The row's network is checked separately against the chain ('network mismatch'). null (never equal to any
+   * mint) when the chain declares none, so verification still fails closed.
+   */
+  private expectedMint(): string | null {
+    return usdcMintOrNull(this.chain);
   }
 
   private async settle(row: PurchaseRow, expectedAmount: bigint): Promise<VerifyResult> {
@@ -185,7 +194,32 @@ export class VerificationService {
     } else {
       this.logger.log(`Order ${orderId} paid; fulfillment held (ENABLE_LIVE_FULFILLMENT is false)`);
     }
+    // Only the single winning settle reaches this line, so the confirmation is requested once per order.
+    await this.notifyPaid(orderId, row.customerId);
     return { ...base, outcome: 'FINALIZED', settledNow: true };
+  }
+
+  /** After the settlement committed. Fail-soft and time-boxed (see runOrderEmailHook); the dedupeKey backs up the once-only rule. */
+  private async notifyPaid(orderId: string, customerId: string): Promise<void> {
+    await runOrderEmailHook({
+      email: this.email,
+      logger: this.logger,
+      template: 'order_confirmation',
+      orderId,
+      build: async () => {
+        const [customer, order] = await Promise.all([
+          this.prisma.customer.findUnique({ where: { id: customerId }, select: { email: true } }),
+          this.prisma.order.findUnique({ where: { id: orderId }, select: { totalCents: true, currency: true } }),
+        ]);
+        if (!customer?.email || !order) return null;
+        return {
+          to: customer.email,
+          template: 'order_confirmation',
+          dedupeKey: `order_confirmation:${orderId}`,
+          data: { orderId, totalCents: order.totalCents, currency: order.currency },
+        };
+      },
+    });
   }
 
   private async markFailed(row: PurchaseRow, reason: string, manualReview: boolean): Promise<VerifyResult> {

@@ -8,7 +8,7 @@ import { WalletProvider, useWallet } from './wallet-provider';
 import { ManualDevnetFunding } from './manual-devnet-funding';
 import { buttonClass, eyebrowClass, Notice, primaryButtonClass, SANDBOX_NOTE, Spinner } from './ui';
 import {
-  apiRequest, createOrderTopUp, errorMessage, fetchCheckoutStatus, mockCompleteOnramp, prepareCheckout, submitCheckout, WalletApiError,
+  createOrderTopUp, errorMessage, fetchCheckoutStatus, mockCompleteOnramp, prepareCheckout, submitCheckout, WalletApiError,
   type CheckoutPreparation, type OrderTopUp,
 } from '../../lib/wallet/api';
 import { ATOMIC_PER_CENT, centsToAtomic, formatCents, formatSol, formatUsdc, formatWholeNumber, researchCredits } from '../../lib/wallet/credits';
@@ -17,14 +17,20 @@ import {
   createTopUpRun, createTopUpStore, DEFAULT_TOPUP_OPTIONS, findResumableTopUp, fundingOf, quoteFundingMode, safeWidgetUrl,
   type FundingMode, type TopUpDeps, type TopUpPlan, type TopUpRun, type TopUpState, type TopUpStore, type WidgetOpenResult,
 } from '../../lib/wallet/topup-flow';
+import { CommerceError, createQuotedOrder, type StockConflict } from '../../lib/orders/quote/client';
+import { canCheckout, cartKey, type CartQuote, type CreatedOrder } from '../../lib/orders/quote/model';
+import { createOrderReview } from '../../lib/orders/quote/review';
+import { OrderTotals } from '../../lib/orders/quote/summary';
 
 export type CreditsCheckoutRequest = { id: number; email: string; shippingAddress: string };
 export type CreditsCheckoutItem = { slug: string; quantity: number };
+type CreditsCheckoutProps = { request: CreditsCheckoutRequest; items: CreditsCheckoutItem[]; reviewedQuote: CartQuote; onOrderCreated: (order: CreatedOrder) => void; onStockConflict: (stock: StockConflict) => void; onClose: () => void };
 
 type Stage =
   | { kind: 'review' }
   | { kind: 'working'; label: string }
   | { kind: 'order-unavailable'; detail: string }
+  | { kind: 'order-review'; order: CreatedOrder }
   | { kind: 'topup-offer'; offer: TopUpOffer }
   | { kind: 'topup-run'; funding: FundingMode }
   | { kind: 'topup-cancelled' }
@@ -41,8 +47,7 @@ const DEFAULT_TIMEOUT_MINUTES = DEFAULT_TOPUP_OPTIONS.timeoutMs / 60_000;
 const STATUS_POLL_MS = 4000;
 const newOrderKey = () => `hf-${crypto.randomUUID()}`;
 
-type CatalogProduct = { id: string; lots: { code: string }[] };
-const STAGE_GROUP: Record<Stage['kind'], string> = { review: 'review', working: 'working', 'order-unavailable': 'unavailable', 'topup-offer': 'topup-offer', 'topup-run': 'topup-run', 'topup-cancelled': 'topup-cancelled', authorize: 'authorize', signing: 'working', rejected: 'rejected', submitted: 'submitted', finalized: 'finalized', failed: 'failed' };
+const STAGE_GROUP: Record<Stage['kind'], string> = { review: 'review', working: 'working', 'order-unavailable': 'unavailable', 'order-review': 'order-review', 'topup-offer': 'topup-offer', 'topup-run': 'topup-run', 'topup-cancelled': 'topup-cancelled', authorize: 'authorize', signing: 'working', rejected: 'rejected', submitted: 'submitted', finalized: 'finalized', failed: 'failed' };
 
 function openSessionStore(): TopUpStore | null {
   try { return typeof window === 'undefined' ? null : createTopUpStore(window.sessionStorage); } catch { return null; }
@@ -69,20 +74,24 @@ const abortableSleep = (ms: number, signal: AbortSignal) => new Promise<void>((r
 const transactionProblems = (prep: CheckoutPreparation, signerAddress: string): Promise<string[]> => checkoutPreparationProblems(prep, signerAddress);
 
 /** Mounted lazily when the customer clicks "Pay with Research Credits" so no wallet is opened just by viewing checkout. */
-export function CreditsCheckoutSection(props: { request: CreditsCheckoutRequest; items: CreditsCheckoutItem[]; subtotalCents: number; onClose: () => void }) {
+export function CreditsCheckoutSection(props: CreditsCheckoutProps) {
   const { session, isReady } = useAuth();
   if (!isReady) return null;
   if (!session) return <section aria-label="Pay with Research Credits" className="rounded-xl border border-silver bg-porcelain p-5 text-sm leading-6"><p className="font-semibold">Sign in to pay with Research Credits.</p><p className="mt-1 text-slate-600">Research Credits live in your own wallet, which is opened after you sign in.</p><div className="mt-4 flex flex-wrap gap-3"><Link className={primaryButtonClass} href="/login">Sign in</Link><button type="button" className={buttonClass} onClick={props.onClose}>Close</button></div></section>;
   return <WalletProvider><Panel {...props} /></WalletProvider>;
 }
 
-function Panel({ request, items, subtotalCents, onClose }: { request: CreditsCheckoutRequest; items: CreditsCheckoutItem[]; subtotalCents: number; onClose: () => void }) {
+function Panel({ request, items, reviewedQuote, onOrderCreated, onStockConflict, onClose }: CreditsCheckoutProps) {
   const wallet = useWallet();
   const reduce = useReducedMotion();
   const [stage, setStage] = useState<Stage>({ kind: 'review' });
   const [orderId, setOrderId] = useState<string | null>(null);
   const [orderTotalCents, setOrderTotalCents] = useState<number | null>(null);
   const keyRef = useRef<string>(newOrderKey());
+  const reviewRef = useRef(createOrderReview());
+  const alive = useRef(true);
+  const creating = useRef(false);
+  const createAbort = useRef<AbortController | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [runState, setRunState] = useState<TopUpState>({ kind: 'idle' });
@@ -97,10 +106,12 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
 
   // A stale or unreachable balance is unknown, never 0 (the API reports stale:true with spendable 0).
   const spendable = wallet.balanceFresh && wallet.balance ? wallet.balance.spendableAtomic : null;
-  const localTotalAtomic = centsToAtomic(subtotalCents);
+  const quotedTotalCents = reviewedQuote.quote?.totalCents ?? null;
+  const localTotalAtomic = quotedTotalCents === null ? null : centsToAtomic(quotedTotalCents);
+  const quoteReady = canCheckout(reviewedQuote) && reviewedQuote.cartKey === cartKey(items);
   const stale = wallet.service === 'unavailable' || wallet.balance?.stale === true;
   const emailMismatch = wallet.email !== null && request.email.trim().toLowerCase() !== wallet.email;
-  const insufficient = spendable !== null && spendable < localTotalAtomic;
+  const insufficient = spendable !== null && localTotalAtomic !== null && spendable < localTotalAtomic;
 
   // Move focus to the panel heading whenever the stage group changes (keyboard / screen reader users).
   const group = stage.kind === 'topup-run' ? `topup-run-${runState.kind}` : STAGE_GROUP[stage.kind];
@@ -108,10 +119,11 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
 
   /** Fetch, verify and (only on the customer's click) authorize the payment. `allowTopUp` is false when we got here from a top-up result, so the two can never ping-pong. */
   const prepare = async (id: string, expectedCents: number, allowTopUp = true) => {
-    if (!wallet.email || !wallet.signer) return;
+    if (!alive.current || !reviewRef.current.allows(id, expectedCents) || !wallet.email || !wallet.signer) return;
     setStage({ kind: 'working', label: 'Preparing your payment authorization...' });
     try {
       const prep = await prepareCheckout(wallet.email, id);
+      if (!alive.current) return;
       const problems: string[] = [];
       if (prep.amountAtomic !== centsToAtomic(expectedCents)) problems.push('The payment amount does not match your order total.');
       if (prep.expiresAt && Date.parse(prep.expiresAt) <= Date.now()) problems.push('This payment request has already expired.');
@@ -120,6 +132,7 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
       if (problems.length) { setStage({ kind: 'failed', message: `Nothing was signed. ${problems.join(' ')}` }); return; }
       setStage({ kind: 'authorize', prep });
     } catch (e) {
+      if (!alive.current) return;
       if (e instanceof WalletApiError && e.status === 409 && /in flight|finalized payment/i.test(e.message)) {
         // A payment for this order already exists server-side: do not claim anything, just follow its real status.
         setStage({ kind: 'submitted', statusNote: 'This order already has a payment in progress. Following its status.' });
@@ -132,21 +145,24 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
 
   /** Asks the API what this order still needs. Moves no money: it only returns a quote to show. */
   const requestTopUp = async (id: string, totalCents: number) => {
-    if (!wallet.email) return;
+    if (!alive.current || !reviewRef.current.allows(id, totalCents) || !wallet.email) return;
     runRef.current?.suspend();
     setStage({ kind: 'working', label: 'Checking what this order needs...' });
     try {
       const result = await createOrderTopUp(wallet.email, id);
-      if (result.requiredAtomic !== centsToAtomic(totalCents)) { setStage({ kind: 'failed', message: 'Nothing was signed or bought. The top-up service reports a different order total than the order itself.' }); return; }
+      if (!alive.current) return;
+      if (result.orderId !== id || result.requiredAtomic !== centsToAtomic(totalCents)) { setStage({ kind: 'failed', message: 'Nothing was signed or bought. The top-up service reports a different order or total than the order itself.' }); return; }
       if (!result.topUpNeeded) { await prepare(id, totalCents, false); return; }
       setStage({ kind: 'topup-offer', offer: result });
     } catch (e) {
+      if (!alive.current) return;
       setStage({ kind: 'failed', message: `Nothing was signed or bought. ${errorMessage(e, 'Wallet service unavailable')}` });
     }
   };
 
   /** Builds a run whose pay step is the EXISTING authorization flow (prepare, verify, sign with this browser's wallet, submit). */
   const startRun = (plan: TopUpPlan, mode: 'start' | 'resume') => {
+    if (!alive.current || plan.requiredAtomic % ATOMIC_PER_CENT !== 0n || !reviewRef.current.allows(plan.orderId, Number(plan.requiredAtomic / ATOMIC_PER_CENT))) return;
     const w = walletRef.current;
     if (!w.email || !w.signer) return;
     const email = w.email;
@@ -220,7 +236,10 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
   };
 
   // Stop watching (never signing) if the panel goes away. The sessionStorage record stays so the order can be resumed in this tab.
-  useEffect(() => () => { runRef.current?.suspend(); runRef.current = null; orderRef.current = null; }, []);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; createAbort.current?.abort(); runRef.current?.suspend(); runRef.current = null; orderRef.current = null; };
+  }, []);
   // Re-check immediately when this tab comes back to the front (the provider window is usually in front while the customer pays).
   useEffect(() => {
     const onVisible = () => { if (document.visibilityState === 'visible') runRef.current?.nudge(); };
@@ -238,7 +257,7 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
     if (found.kind === 'none') return;
     if (found.kind === 'expired') { store.clear(); setNotice(`An earlier top-up for order ${found.record.orderId} was too old to continue automatically, so nothing was signed. That order is still awaiting payment.`); return; }
     const cents = found.plan.requiredAtomic % ATOMIC_PER_CENT === 0n ? Number(found.plan.requiredAtomic / ATOMIC_PER_CENT) : null;
-    if (cents === null) { store.clear(); return; }
+    if (cents === null || !reviewRef.current.restoreConsent(found.plan.orderId, cents)) { store.clear(); return; }
     orderRef.current = { id: found.plan.orderId, totalCents: cents };
     setOrderId(found.plan.orderId); setOrderTotalCents(cents);
     if (found.plan.payStartedAt) {
@@ -252,34 +271,39 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
   }, [walletReady, wallet.email]);
 
   const createOrderAndPrepare = async () => {
-    if (!wallet.email) return;
+    if (!wallet.email || !quoteReady || !reviewedQuote.quote || !wallet.balanceFresh || emailMismatch || creating.current || orderRef.current) return;
+    creating.current = true;
+    const abort = new AbortController();
+    createAbort.current = abort;
     setStage({ kind: 'working', label: 'Creating your order...' });
-    let order: { id: string; totalCents: number };
+    let order: CreatedOrder;
     try {
-      const resolved: { productId: string; lotCode: string; quantity: number }[] = [];
-      for (const item of items) {
-        const product = await apiRequest<CatalogProduct>(`/products/${encodeURIComponent(item.slug)}`);
-        const lot = product?.lots?.[0];
-        if (!product?.id || !lot?.code) throw new WalletApiError('No released lot', 404, true);
-        resolved.push({ productId: product.id, lotCode: lot.code, quantity: item.quantity });
-      }
-      const created = await apiRequest<{ id?: unknown; totalCents?: unknown }>('/orders', {
-        method: 'POST', headers: { 'Idempotency-Key': keyRef.current },
-        body: { email: request.email.trim(), shippingAddress: request.shippingAddress.trim(), items: resolved, researchUseAcknowledged: true, idempotencyKey: keyRef.current },
-      });
-      if (typeof created?.id !== 'string' || typeof created.totalCents !== 'number' || !Number.isSafeInteger(created.totalCents)) throw new WalletApiError('Unexpected order response', null, true);
-      order = { id: created.id, totalCents: created.totalCents };
+      order = await createQuotedOrder({ items, reviewed: reviewedQuote, email: request.email, shippingAddress: request.shippingAddress, idempotencyKey: keyRef.current }, { signal: abort.signal });
     } catch (e) {
-      const catalogMiss = e instanceof WalletApiError && (e.status === 404 || e.unavailable);
-      setStage(catalogMiss
-        ? { kind: 'order-unavailable', detail: 'The preview catalog items could not be matched to products in the order service (or the service is not running), so no order was created and nothing was charged.' }
-        : { kind: 'failed', message: errorMessage(e, 'The order could not be created.') });
+      if (!alive.current || abort.signal.aborted) return;
+      if (e instanceof CommerceError && e.stock) { onStockConflict(e.stock); return; }
+      setStage({ kind: 'order-unavailable', detail: `${errorMessage(e, 'The order could not be verified.')} Nothing was paid or topped up.` });
       return;
+    } finally {
+      creating.current = false;
     }
+    if (!alive.current || abort.signal.aborted) return;
     setOrderId(order.id); setOrderTotalCents(order.totalCents);
     orderRef.current = { id: order.id, totalCents: order.totalCents };
+    onOrderCreated(order);
+    if (reviewRef.current.record(reviewedQuote.quote, order)) {
+      setStage({ kind: 'order-review', order });
+      return;
+    }
+    await continueOrderPayment(order);
+  };
+
+  const continueOrderPayment = async (order: { id: string; totalCents: number }) => {
+    if (!alive.current || !reviewRef.current.allows(order.id, order.totalCents)) return;
     // Short on credits: offer the inline top-up (the API sizes it from the real order total). Otherwise go straight to authorization.
-    if (spendable !== null && spendable < centsToAtomic(order.totalCents)) { await requestTopUp(order.id, order.totalCents); return; }
+    const currentWallet = walletRef.current;
+    if (!currentWallet.balanceFresh || !currentWallet.balance) { setStage({ kind: 'failed', message: 'Refresh your wallet balance before continuing with this order.' }); return; }
+    if (currentWallet.balance.spendableAtomic < centsToAtomic(order.totalCents)) { await requestTopUp(order.id, order.totalCents); return; }
     await prepare(order.id, order.totalCents);
   };
 
@@ -321,8 +345,10 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
   }, [polling, wallet.email, orderId, wallet.refresh]);
 
   const startOver = () => {
+    if (orderRef.current) { onClose(); return; }
     runRef.current?.cancel(); runRef.current = null; orderRef.current = null; openSessionStore()?.clear();
-    keyRef.current = newOrderKey(); setOrderId(null); setOrderTotalCents(null); setNotice(null); setRunState({ kind: 'idle' }); setStage({ kind: 'review' });
+    // Keep the key for an uncertain order response: a retry must not reserve stock twice.
+    setOrderId(null); setOrderTotalCents(null); setNotice(null); setRunState({ kind: 'idle' }); setStage({ kind: 'review' });
   };
   const motionProps = reduce ? {} : { initial: { opacity: 0, y: 8 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -8 }, transition: { duration: 0.2 } };
 
@@ -341,24 +367,26 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
         <motion.div key={group} {...motionProps}>
           {stage.kind === 'review' ? <div className="space-y-4">
             <dl className="divide-y divide-silver border-y border-silver text-sm">
-              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Order total</dt><dd className="font-mono">{formatUsdc(localTotalAtomic)} USDC (${formatCents(subtotalCents)})</dd></div>
+              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Quoted total</dt><dd className="font-mono">{localTotalAtomic !== null && quotedTotalCents !== null ? `${formatUsdc(localTotalAtomic)} USDC ($${formatCents(quotedTotalCents)})` : 'Unavailable'}</dd></div>
               <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Spendable credits</dt><dd className="font-mono">{spendable !== null ? `${formatWholeNumber(researchCredits(spendable))} credits (${formatUsdc(spendable)} USDC)` : 'Not available'}</dd></div>
             </dl>
             {gateMessage ? <Notice tone={wallet.service === 'unavailable' ? 'warn' : 'info'} title={wallet.service === 'unavailable' ? 'Wallet service unavailable' : undefined}>{gateMessage}</Notice> : null}
             {emailMismatch ? <Notice tone="error" title="Email does not match your account">Research Credits can only pay for orders placed with your signed-in account email ({wallet.email}). Update the email field above, then try again.</Notice> : null}
             {notice ? <Notice tone="info">{notice}</Notice> : null}
-            {insufficient ? <Notice tone="warn" title="Not enough Research Credits yet">This order needs {formatUsdc(localTotalAtomic)} USDC and you have {formatUsdc(spendable)} USDC spendable. Nothing has been charged. You can top up here with a card or bank via MoonPay (MoonPay, not Helix &amp; Field, handles ID checks, fees and payment). The next step creates your order (awaiting payment) and shows an exact quote; nothing is bought or signed until you agree to it.</Notice> : null}
+            {insufficient && localTotalAtomic !== null ? <Notice tone="warn" title="Not enough Research Credits yet">This order needs {formatUsdc(localTotalAtomic)} USDC and you have {formatUsdc(spendable)} USDC spendable. Nothing has been charged. You can top up here with a card or bank via MoonPay (MoonPay, not Helix &amp; Field, handles ID checks, fees and payment). The next step creates your order (awaiting payment) and shows an exact quote; nothing is bought or signed until you agree to it.</Notice> : null}
             {stale && wallet.balance ? <Notice tone="warn" title="Balance may be out of date">Wait for the balance to refresh before paying.</Notice> : null}
             <p className="text-xs leading-6 text-slate-500">Paying creates an order, then asks you to authorize one USDC transfer from your own wallet. Your order is not marked paid until the transfer is finalized on-chain.</p>
-            <button type="button" className={primaryButtonClass} disabled={Boolean(gateMessage) || emailMismatch || stale || wallet.balance === null} onClick={createOrderAndPrepare}>{insufficient ? 'Create order and see top-up quote' : 'Create order and review authorization'}</button>
+            {!quoteReady ? <Notice tone="warn">A current, available quote is required. Close this panel and refresh the quote.</Notice> : null}
+            <button type="button" className={primaryButtonClass} disabled={!quoteReady || Boolean(gateMessage) || emailMismatch || stale || !wallet.balanceFresh} onClick={createOrderAndPrepare}>{insufficient ? 'Create order and see top-up quote' : 'Create order and review authorization'}</button>
           </div>
           : stage.kind === 'working' ? <Spinner label={stage.label} />
           : stage.kind === 'signing' ? <Spinner label="Signing in this browser and submitting..." />
-          : stage.kind === 'order-unavailable' ? <div className="space-y-4"><Notice tone="warn" title="Order service unavailable in preview">{stage.detail}</Notice><div className="flex flex-wrap gap-3"><button type="button" className={buttonClass} onClick={startOver}>Back</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
+          : stage.kind === 'order-unavailable' ? <div className="space-y-4"><Notice tone="warn" title="Order could not be verified">{stage.detail}</Notice><div className="flex flex-wrap gap-3"><button type="button" className={buttonClass} onClick={createOrderAndPrepare}>Retry this order request</button><button type="button" className={buttonClass} onClick={onClose}>Close and refresh quote</button></div></div>
+          : stage.kind === 'order-review' ? <div className="space-y-4"><Notice tone="warn" title="Order pricing changed — review required">Your reviewed quote was {quotedTotalCents !== null ? `$${formatCents(quotedTotalCents)}` : 'unavailable'}. The order service returned the totals below. Nothing has been prepared for payment or topped up. Review the new pricing before continuing.</Notice><OrderTotals totals={stage.order} /><p className="text-xs leading-6 text-slate-600">Order {stage.order.id} remains awaiting payment. Continuing reviews authorization or a top-up offer; a top-up still needs your separate consent.</p><div className="flex flex-wrap gap-3"><button type="button" className={primaryButtonClass} onClick={() => { if (reviewRef.current.accept(stage.order.id)) void continueOrderPayment(stage.order); }}>Accept updated order total and continue</button><button type="button" className={buttonClass} onClick={onClose}>Leave order unpaid</button></div></div>
           : stage.kind === 'topup-offer' ? <TopUpOfferPanel offer={stage.offer} address={wallet.address} onConfirm={() => confirmTopUp(stage.offer)} onCancel={cancelTopUp} />
           : stage.kind === 'topup-run' ? <TopUpRunPanel state={runState} funding={stage.funding} address={wallet.address} widgetUrl={runWidgetUrl.current ? safeWidgetUrl(runWidgetUrl.current) : null} simulation={simulation} onSimulate={simulateDeposit} onCancel={cancelTopUp} onKeepWaiting={() => runRef.current?.keepWaiting()} onTopUpMore={() => orderId && orderTotalCents !== null ? void requestTopUp(orderId, orderTotalCents) : undefined} />
           : stage.kind === 'topup-cancelled' ? <div className="space-y-4"><Notice tone="info" title="Top-up cancelled">Nothing was signed or sent from your wallet. {orderId ? `Order ${orderId} remains awaiting payment.` : ''} If you already completed a MoonPay purchase, that USDC still arrives in your own wallet and stays yours.</Notice><div className="flex flex-wrap gap-3">{orderId && orderTotalCents !== null ? <button type="button" className={primaryButtonClass} onClick={() => void prepare(orderId, orderTotalCents)}>Check this order again</button> : null}<button type="button" className={buttonClass} onClick={startOver}>Start over</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
-          : stage.kind === 'authorize' ? <AuthorizePanel prep={stage.prep} orderId={orderId} orderTotalCents={orderTotalCents} subtotalCents={subtotalCents} onAuthorize={() => authorize(stage.prep)} onReject={() => { openSessionStore()?.clear(); setStage({ kind: 'rejected' }); }} />
+          : stage.kind === 'authorize' ? <AuthorizePanel prep={stage.prep} orderId={orderId} orderTotalCents={orderTotalCents} onAuthorize={() => authorize(stage.prep)} onReject={() => { openSessionStore()?.clear(); setStage({ kind: 'rejected' }); }} />
           : stage.kind === 'rejected' ? <div className="space-y-4"><Notice tone="info" title="Authorization rejected">Nothing was signed or sent from your wallet, so you were not charged. {orderId ? `Order ${orderId} remains unpaid.` : ''}</Notice><div className="flex flex-wrap gap-3"><button type="button" className={primaryButtonClass} onClick={() => orderId && orderTotalCents !== null ? void prepare(orderId, orderTotalCents) : startOver()}>Review authorization again</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
           : stage.kind === 'submitted' ? <div className="space-y-4"><Notice tone="info" title="Submitted - waiting for finalization">Your authorization was sent. Your order is <b>not paid yet</b>: we show payment only after the order status reports it finalized. This can take a minute.{stage.statusNote ? <> {stage.statusNote}</> : null}</Notice><Spinner label="Checking order status..." /></div>
           : stage.kind === 'finalized' ? <Notice tone="success" title="Payment finalized">The order status endpoint reports your order as paid and the USDC transfer as finalized.{orderId ? ` Order reference: ${orderId}.` : ''}</Notice>
@@ -369,7 +397,7 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
   </section>;
 }
 
-function AuthorizePanel({ prep, orderId, orderTotalCents, subtotalCents, onAuthorize, onReject }: { prep: CheckoutPreparation; orderId: string | null; orderTotalCents: number | null; subtotalCents: number; onAuthorize: () => void; onReject: () => void }) {
+function AuthorizePanel({ prep, orderId, orderTotalCents, onAuthorize, onReject }: { prep: CheckoutPreparation; orderId: string | null; orderTotalCents: number | null; onAuthorize: () => void; onReject: () => void }) {
   return <div className="space-y-5">
     <p className="rounded-xl bg-midnight p-4 text-sm font-medium leading-6 text-porcelain">You are authorizing a USDC transfer from your wallet.</p>
     <dl className="divide-y divide-silver border-y border-silver text-sm">
@@ -382,7 +410,7 @@ function AuthorizePanel({ prep, orderId, orderTotalCents, subtotalCents, onAutho
       {orderId ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Order</dt><dd className="break-all text-right font-mono text-xs">{orderId}</dd></div> : null}
       {prep.expiresAt ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Request expires</dt><dd>{new Date(prep.expiresAt).toLocaleTimeString()}</dd></div> : null}
     </dl>
-    {orderTotalCents !== null && orderTotalCents !== subtotalCents ? <Notice tone="warn" title="Total differs from your bag">The order service priced this order at ${formatCents(orderTotalCents)}; your bag preview showed ${formatCents(subtotalCents)}. The amount above is what you would authorize.</Notice> : null}
+    {orderTotalCents !== null ? <p className="text-sm text-slate-600">Stored order total: ${formatCents(orderTotalCents)} USD.</p> : null}
     {prep.disclosures.length ? <ul className="space-y-2 text-xs leading-6 text-slate-700">{prep.disclosures.map((d) => <li key={d} className="rounded-lg bg-porcelain p-3">{d}</li>)}</ul> : null}
     <p className="text-xs leading-6 text-slate-600">{prep.feeSponsored ? 'Network fee: paid by Helix & Field. Your wallet signs only the USDC transfer and does not need any SOL for this payment.' : 'The network fee is paid in SOL from your wallet.'} Blockchain transfers may be irreversible. The platform servers hold no key for your wallet; this signature is created in this browser with your sandbox key.</p>
     <div className="flex flex-wrap gap-3"><button type="button" className={primaryButtonClass} onClick={onAuthorize}>Authorize {formatUsdc(prep.amountAtomic)} USDC payment</button><button type="button" className={buttonClass} onClick={onReject}>Cancel - no charge</button></div>

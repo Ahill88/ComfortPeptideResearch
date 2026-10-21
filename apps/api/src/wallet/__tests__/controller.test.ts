@@ -5,7 +5,8 @@ import { Test } from '@nestjs/testing';
 import { Keypair, Transaction } from '@solana/web3.js';
 import { PrismaService } from '../../prisma.service';
 import { SandboxSolanaChain } from '../chain/sandbox-solana-chain';
-import { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WalletModule } from '../wallet.module';
+import { COMPLIANCE_SCREEN, SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WalletModule } from '../wallet.module';
+import { AllowAllComplianceScreen } from '../transfers/compliance-screen';
 import { FakePrisma, signLinkMessage } from './helpers';
 
 /** Through Nest DI, guard, validation pipe, interceptor and HTTP, using the in-memory prisma double. */
@@ -14,10 +15,14 @@ async function boot() {
   @Global()
   @Module({ providers: [{ provide: PrismaService, useValue: prisma }], exports: [PrismaService] })
   class FakePrismaModule {}
+  // COMPLIANCE_SCREEN is provided by the global SanctionsModule in the app; this fixture binds allow-all.
+  @Global()
+  @Module({ providers: [{ provide: COMPLIANCE_SCREEN, useFactory: () => new AllowAllComplianceScreen() }], exports: [COMPLIANCE_SCREEN] })
+  class AllowAllScreenModule {}
 
   // Pin the manual-finalize sandbox (the factory-built sandbox auto-finalizes) so this test can observe
   // the SUBMITTED -> finalized transition explicitly.
-  const moduleRef = await Test.createTestingModule({ imports: [FakePrismaModule, WalletModule] })
+  const moduleRef = await Test.createTestingModule({ imports: [FakePrismaModule, AllowAllScreenModule, WalletModule] })
     .overrideProvider(SOLANA_CHAIN)
     .useValue(new SandboxSolanaChain())
     .compile();

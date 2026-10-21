@@ -148,8 +148,9 @@ export function resolveWidgetClientIp(customerIp: string | undefined, env: { NOD
 @Injectable()
 export class MoonPayOnRampProvider implements OnRampProvider {
   constructor(
-    private readonly flags: Pick<WalletFeatureFlags, 'enableRealMoonpay' | 'enableSolanaMainnet'>,
-    private readonly config: Pick<WalletRuntimeConfig, 'moonpayPublishableKey' | 'moonpaySigningSecret' | 'treasuryAddress'>,
+    private readonly flags: Pick<WalletFeatureFlags, 'enableRealMoonpay' | 'enableSolanaMainnet'> & Partial<Pick<WalletFeatureFlags, 'enableLiveCryptoPayments'>>,
+    /** solanaNetwork is optional only for older call sites: when absent, a live key is refused (fail closed). */
+    private readonly config: Pick<WalletRuntimeConfig, 'moonpayPublishableKey' | 'moonpaySigningSecret' | 'treasuryAddress'> & Partial<Pick<WalletRuntimeConfig, 'solanaNetwork'>>,
   ) {}
 
   async createQuote(input: MoonPayQuoteInput): Promise<OnRampQuote> {
@@ -183,12 +184,22 @@ export class MoonPayOnRampProvider implements OnRampProvider {
       throw new ServiceUnavailableException('MoonPay is enabled but MOONPAY_PUBLISHABLE_KEY / MOONPAY_SECRET_KEY are not configured');
     }
     let host: string;
-    if (apiKey.startsWith('pk_test_')) host = MOONPAY_SANDBOX_HOST;
-    else if (apiKey.startsWith('pk_live_')) {
+    const onMainnet = this.config.solanaNetwork === 'solana-mainnet';
+    if (apiKey.startsWith('pk_test_')) {
+      host = MOONPAY_SANDBOX_HOST;
+      // A sandbox key delivers fake funds: on a mainnet configuration that is a misconfiguration, never a working purchase.
+      if (onMainnet) throw new ServiceUnavailableException('A MoonPay test key (pk_test_) cannot be used while SOLANA_NETWORK is mainnet');
+    } else if (apiKey.startsWith('pk_live_')) {
       host = MOONPAY_LIVE_HOST;
       // MoonPay delivers mainnet USDC. Never aim live purchases at a deployment that is not on mainnet.
       if (!this.flags.enableSolanaMainnet) {
         throw new ServiceUnavailableException('A live MoonPay key requires ENABLE_SOLANA_MAINNET=true');
+      }
+      if (!onMainnet) {
+        throw new ServiceUnavailableException('A live MoonPay key (pk_live_) requires SOLANA_NETWORK to be solana-mainnet');
+      }
+      if (this.flags.enableLiveCryptoPayments !== true) {
+        throw new ServiceUnavailableException('A live MoonPay key requires ENABLE_LIVE_CRYPTO_PAYMENTS=true');
       }
     } else {
       throw new ServiceUnavailableException('MOONPAY_PUBLISHABLE_KEY must start with pk_test_ or pk_live_');

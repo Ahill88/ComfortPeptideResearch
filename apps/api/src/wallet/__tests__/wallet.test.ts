@@ -290,8 +290,17 @@ test('real MoonPay fails closed on missing keys, live key without mainnet, fract
   assert.equal((await rejection(noKeys.createQuote(base))).status, 503);
   const live = new MoonPayOnRampProvider(on, makeConfig({ moonpayPublishableKey: 'pk_live_x', moonpaySigningSecret: 's' }));
   assert.equal((await rejection(live.createQuote(base))).status, 503);
-  const liveMainnet = new MoonPayOnRampProvider({ ...on, enableSolanaMainnet: true }, makeConfig({ moonpayPublishableKey: 'pk_live_x', moonpaySigningSecret: 's' }));
+  const liveKeyCfg = { moonpayPublishableKey: 'pk_live_x', moonpaySigningSecret: 's' };
+  // A live key needs the mainnet flag AND a mainnet network AND the live-payments flag; a flag alone is not enough.
+  const liveFlagOnly = new MoonPayOnRampProvider({ ...on, enableSolanaMainnet: true, enableLiveCryptoPayments: true }, makeConfig(liveKeyCfg));
+  assert.match((await rejection(liveFlagOnly.createQuote(base))).message, /solana-mainnet/);
+  const liveNoLiveFlag = new MoonPayOnRampProvider({ ...on, enableSolanaMainnet: true }, makeConfig({ ...liveKeyCfg, solanaNetwork: 'solana-mainnet' }));
+  assert.match((await rejection(liveNoLiveFlag.createQuote(base))).message, /ENABLE_LIVE_CRYPTO_PAYMENTS/);
+  const liveMainnet = new MoonPayOnRampProvider({ ...on, enableSolanaMainnet: true, enableLiveCryptoPayments: true }, makeConfig({ ...liveKeyCfg, solanaNetwork: 'solana-mainnet' }));
   assert.equal(new URL((await liveMainnet.createQuote(base)).widgetUrl).origin, 'https://buy.moonpay.com');
+  // A test key on a mainnet configuration is refused (fake funds must never be aimed at a mainnet deployment).
+  const testOnMainnet = new MoonPayOnRampProvider({ ...on, enableSolanaMainnet: true, enableLiveCryptoPayments: true }, makeConfig({ moonpayPublishableKey: 'pk_test_x', moonpaySigningSecret: 's', solanaNetwork: 'solana-mainnet' }));
+  assert.match((await rejection(testOnMainnet.createQuote(base))).message, /pk_test_/);
   const test_ = new MoonPayOnRampProvider(on, makeConfig({ moonpayPublishableKey: 'pk_test_x', moonpaySigningSecret: 's', treasuryAddress: treasury }));
   assert.equal((await rejection(test_.createQuote({ ...base, intendedUsdCents: 5_050 }))).status, 400);
   assert.equal((await rejection(test_.createQuote({ ...base, destinationAddress: treasury }))).status, 400);

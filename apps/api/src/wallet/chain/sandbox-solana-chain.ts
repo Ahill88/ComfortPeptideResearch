@@ -40,6 +40,7 @@ interface SandboxTransfer extends ChainTransfer {
  * - broadcast() really parses and signature-verifies the transaction, so signing bugs are caught.
  */
 export class SandboxSolanaChain implements WalletChain {
+  /** The sandbox simulates DEVNET only and never claims another network (tests pin this); its mint is therefore the built-in devnet one. */
   readonly network: SolanaNetwork = SOLANA_NETWORK_DEVNET;
   readonly usdcMint = USDC_DEVNET_MINT;
 

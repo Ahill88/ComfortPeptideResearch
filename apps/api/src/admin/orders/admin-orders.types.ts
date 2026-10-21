@@ -19,13 +19,17 @@ export const SEARCH_QUERY_MAX = 100;
 export const DEFAULT_LIST_LIMIT = 25;
 export const MAX_LIST_LIMIT = 100;
 
-export type AdminOrderAction = 'start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'add-note';
+export type AdminOrderAction = 'start-packing' | 'ship' | 'mark-delivered' | 'cancel' | 'refund' | 'add-note';
 
 export const PAID_ORDER_CANCEL_MESSAGE = 'Paid orders are refunded through the refunds process, not cancelled.';
 
 export interface AdminOrderSummary {
   id: string;
   status: OrderStatusName;
+  /** Sum of the line prices; null for orders created before totals were stored. totalCents = subtotal + shipping + tax. */
+  subtotalCents: number | null;
+  shippingCents: number;
+  taxCents: number;
   totalCents: number;
   currency: string;
   createdAt: string;
@@ -74,6 +78,17 @@ export interface AdminOrderEvent {
   createdAt: string;
 }
 
+/** The order's refund (docs/api/admin-refunds.md): the one in progress, else the latest one. Never carries a wallet address. */
+export interface AdminOrderRefund {
+  id: string;
+  status: 'REQUESTED' | 'SUBMITTED' | 'FINALIZED' | 'FAILED';
+  /** Decimal string of USDC base units. */
+  amountAtomic: string;
+  txSignature: string | null;
+  requestedAt: string;
+  failureReason: string | null;
+}
+
 export interface AdminOrderDetail extends AdminOrderSummary {
   shippingAddress: string | null;
   items: AdminOrderItem[];
@@ -81,6 +96,7 @@ export interface AdminOrderDetail extends AdminOrderSummary {
   shipments: AdminOrderShipment[];
   /** Oldest first. */
   events: AdminOrderEvent[];
+  refund: AdminOrderRefund | null;
   allowedActions: AdminOrderAction[];
 }
 

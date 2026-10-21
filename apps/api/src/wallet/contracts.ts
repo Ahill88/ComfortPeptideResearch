@@ -10,8 +10,13 @@
 
 export const USDC_DECIMALS = 6;
 export const USDC_BASE_UNITS_PER_USDC = 1_000_000n;
+/**
+ * Built-in USDC mint for DEVNET only: the fallback when SOLANA_USDC_MINT is unset on solana-devnet (see wallet.config.ts).
+ * Nothing may use it for any other network; the one mint source at runtime is `chain.usdcMint` (usdcMintOf in chain/chain.types.ts).
+ */
 export const USDC_DEVNET_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 export const SOLANA_NETWORK_DEVNET = 'solana-devnet';
+export const SOLANA_NETWORK_MAINNET = 'solana-mainnet';
 
 export type SolanaNetwork = 'solana-devnet' | 'solana-mainnet';
 

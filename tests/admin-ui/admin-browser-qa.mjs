@@ -16,6 +16,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { operationsQa } from './operations-browser-qa.mjs';
 
 const temp = '/var/folders/v9/840n4c810px9_kxb2ntl2xt00000gn/T/opencode';
 const tools = process.env.QA_TOOLS || `${temp}/browser-qa-tools`;
@@ -137,7 +138,7 @@ await check('a11y detectors self-test: a low-contrast paragraph and a 30px butto
 await check('unauthenticated visits to every area redirect to /sign-in (incl. wallets, slip, team, audit)', async () => {
   const context = await newContext();
   const page = await context.newPage();
-  for (const path of ['/', '/orders', '/orders/abc', '/orders/abc/packing-slip', '/team', '/audit', '/account/password', '/wallets', '/wallets/balances', '/wallets/failed', '/lots', '/lots/abc', '/products', '/coas/abc/file']) {
+  for (const path of ['/', '/orders', '/orders/abc', '/orders/abc/packing-slip', '/team', '/audit', '/account/password', '/wallets', '/wallets/balances', '/wallets/failed', '/lots', '/lots/abc', '/products', '/coas/abc/file', '/inventory', '/compliance', '/email']) {
     await page.goto(path);
     assert.equal(new URL(page.url()).pathname, '/sign-in', `${path} -> ${page.url()}`);
   }
@@ -1498,6 +1499,9 @@ await check('session expires mid-upload: the upload is refused, nothing is saved
   await context.close();
   void lot;
 });
+
+// ======================================================================= commerce operations; existing checks above remain intact
+await operationsQa({ check, fake, newContext, login, shot, findOrder, callServerAction, logLen, logSince, contrastOffenders, smallTargets, FAKE, BASE });
 
 // ======================================================================= token hygiene (whole run)
 await check('the session token never appears in any URL, request/response body the browser saw, or page HTML', async () => {

@@ -1,7 +1,12 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Inject, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 import { AdminAuditService } from '../admin-audit.service';
+import { INVENTORY_PORT, type InventoryPort } from '../../commerce/inventory.types';
 import { PrismaService } from '../../prisma.service';
+import { assertNoRefundInFlight, currentRefund, loadRefundRows, toAdminRefund, withRefundAction } from './admin-order-refund.view';
+import { EMAIL_PORT, type EmailPort } from '../../email/email.types';
+import { runOrderEmailHook } from '../../orders/customer-orders.email-hook';
+import { buildTrackingUrl } from '../../orders/customer-orders.mappers';
 import {
   type AdminActor,
   type AdminOrderAction,
@@ -86,6 +91,9 @@ const SUMMARY_SELECT = {
   id: true,
   status: true,
   totalCents: true,
+  subtotalCents: true,
+  shippingCents: true,
+  taxCents: true,
   currency: true,
   createdAt: true,
   customer: { select: { id: true, email: true, name: true } },
@@ -96,12 +104,15 @@ type SummaryRow = Prisma.OrderGetPayload<{ select: typeof SUMMARY_SELECT }>;
 
 const PURCHASE_PRIORITY: Record<string, number> = { FINALIZED: 5, CONFIRMED: 4, SUBMITTED: 3, PREPARED: 2, FAILED: 1, EXPIRED: 0 };
 
-function summarize(row: Pick<SummaryRow, 'id' | 'status' | 'totalCents' | 'currency' | 'createdAt' | 'customer' | 'items' | 'shipments'>): AdminOrderSummary {
+function summarize(row: Pick<SummaryRow, 'id' | 'status' | 'totalCents' | 'subtotalCents' | 'shippingCents' | 'taxCents' | 'currency' | 'createdAt' | 'customer' | 'items' | 'shipments'>): AdminOrderSummary {
   // The tracking number shown in lists is the most recent shipment's.
   const latest = [...row.shipments].sort((a, b) => b.shippedAt.getTime() - a.shippedAt.getTime() || (a.id < b.id ? 1 : -1))[0];
   return {
     id: row.id,
     status: row.status,
+    subtotalCents: row.subtotalCents ?? null,
+    shippingCents: row.shippingCents ?? 0,
+    taxCents: row.taxCents ?? 0,
     totalCents: row.totalCents,
     currency: row.currency,
     createdAt: row.createdAt.toISOString(),
@@ -128,7 +139,12 @@ interface Transition {
 export class AdminOrdersService {
   private readonly logger = new Logger(AdminOrdersService.name);
 
-  constructor(private readonly prisma: PrismaService, private readonly audit: AdminAuditService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AdminAuditService,
+    @Optional() @Inject(EMAIL_PORT) private readonly email?: EmailPort,
+    @Optional() @Inject(INVENTORY_PORT) private readonly inventory?: InventoryPort,
+  ) {}
 
   async counts(): Promise<AdminOrderCounts> {
     const rows = await this.prisma.order.groupBy({ by: ['status'], _count: { _all: true } });
@@ -182,6 +198,7 @@ export class AdminOrdersService {
         select: { status: true, amountAtomic: true, txSignature: true, network: true, finalizedAt: true, createdAt: true },
       }),
     ]);
+    const refundRows = await loadRefundRows(this.prisma, id);
     const productById = new Map(products.map((product) => [product.id, product]));
     const adminById = new Map(admins.map((admin) => [admin.id, admin.name]));
 
@@ -215,7 +232,8 @@ export class AdminOrdersService {
         adminName: event.adminId ? adminById.get(event.adminId) ?? null : null,
         createdAt: event.createdAt.toISOString(),
       })),
-      allowedActions: allowedActionsFor(order.status),
+      refund: toAdminRefund(currentRefund(refundRows)),
+      allowedActions: withRefundAction(allowedActionsFor(order.status), order.status, refundRows),
     };
   }
 
@@ -250,7 +268,32 @@ export class AdminOrdersService {
       throw error;
     }
     await this.record(actor, 'order.ship', id, { fromStatus: 'PROCESSING', toStatus: 'SHIPPED', carrier: input.carrier, trackingNumber: input.trackingNumber });
+    await this.notifyShipped(id, input.carrier, input.trackingNumber);
     return this.detail(id);
+  }
+
+  /**
+   * Runs only after the ship transaction committed (and only for the one call that flipped the status). Fail-soft and
+   * time-boxed: see runOrderEmailHook. The dedupeKey makes a repeated enqueue a no-op in the outbox.
+   */
+  private async notifyShipped(orderId: string, carrier: CarrierName, trackingNumber: string): Promise<void> {
+    await runOrderEmailHook({
+      email: this.email,
+      logger: this.logger,
+      template: 'order_shipped',
+      orderId,
+      build: async () => {
+        const order = await this.prisma.order.findUnique({ where: { id: orderId }, select: { customer: { select: { email: true } } } });
+        const to = order?.customer?.email;
+        if (!to) return null;
+        return {
+          to,
+          template: 'order_shipped',
+          dedupeKey: `order_shipped:${orderId}:${trackingNumber}`,
+          data: { orderId, carrier, trackingNumber, trackingUrl: buildTrackingUrl(carrier, trackingNumber) },
+        };
+      },
+    });
   }
 
   /** SHIPPED -> DELIVERED */
@@ -272,7 +315,19 @@ export class AdminOrdersService {
 
   /** PENDING_PAYMENT -> CANCELLED only. Paid orders go through the refunds process. */
   async cancel(id: string, reason: string, actor: AdminActor): Promise<AdminOrderDetail> {
-    await this.transition({ id, from: 'PENDING_PAYMENT', to: 'CANCELLED', label: 'cancel', note: reason.trim(), actor });
+    await this.transition({
+      id,
+      from: 'PENDING_PAYMENT',
+      to: 'CANCELLED',
+      label: 'cancel',
+      note: reason.trim(),
+      actor,
+      // Same transaction as the status flip: either the order is cancelled AND its stock is back, or neither happened.
+      during: async (tx) => {
+        if (!this.inventory) throw new Error('INVENTORY_PORT is not wired: refusing to cancel without releasing stock');
+        await this.inventory.releaseForOrder(tx, id, 'Cancelled by admin');
+      },
+    });
     // The reason text stays on the OrderEvent; the audit row keeps ids and statuses only.
     await this.record(actor, 'order.cancel', id, { fromStatus: 'PENDING_PAYMENT', toStatus: 'CANCELLED' });
     return this.detail(id);
@@ -294,6 +349,8 @@ export class AdminOrdersService {
     const flipped = await this.prisma.$transaction(async (tx) => {
       const result = await tx.order.updateMany({ where: { id: spec.id, status: spec.from }, data: { status: spec.to } });
       if (result.count !== 1) return false;
+      // An order whose refund is already on its way to the customer is neither packed nor shipped (admin-order-refund.view.ts).
+      if (spec.to === 'PROCESSING' || spec.to === 'SHIPPED') await assertNoRefundInFlight(tx, spec.id);
       await spec.during?.(tx);
       await tx.orderEvent.create({
         data: { orderId: spec.id, kind: 'STATUS', fromStatus: spec.from, toStatus: spec.to, note: spec.note, adminId: spec.actor.id },

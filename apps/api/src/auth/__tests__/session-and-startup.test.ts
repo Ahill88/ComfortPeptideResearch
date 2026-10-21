@@ -3,10 +3,9 @@ import * as assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'node:test';
 import { UnauthorizedException } from '@nestjs/common';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
-import { assertAuthReadyForEnvironment } from '../auth-startup.check';
+import { assertAuthReadyForEnvironment, authStartupWarnings } from '../auth-startup.check';
 import { AccountController } from '../account.controller';
 import { AuthModule } from '../auth.module';
-import { AuthService } from '../auth.service';
 import { SessionGuard } from '../session.guard';
 
 const ctx = (headers: Record<string, unknown>) => {
@@ -56,37 +55,40 @@ describe('AccountController', () => {
 });
 
 describe('production startup check', () => {
-  it('throws in production unless AUTH_BACKEND=configured', () => {
-    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production' }), /email verification, password reset, and MFA/);
-    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', AUTH_BACKEND: 'true' }));
-    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', AUTH_BACKEND: '' }));
+  it('boots in production with the features implemented and nothing configured (registration then answers 503)', () => {
+    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production' }));
+    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', STOREFRONT_PUBLIC_URL: 'https://shop.example.com', CUSTOMER_MFA_ENCRYPTION_KEY: 'x'.repeat(40) }));
   });
 
-  it('allows development/test (unset NODE_ENV is production-like, see identity-gates-matrix) and an explicit production assertion', () => {
-    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'development' }));
-    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'test' }));
-    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', AUTH_BACKEND: 'configured' }));
+  it('refuses a configured-but-broken email link base or MFA key in production', () => {
+    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', STOREFRONT_PUBLIC_URL: 'javascript:alert(1)' }), /STOREFRONT_PUBLIC_URL/);
+    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', STOREFRONT_PUBLIC_URL: 'https://u:p@shop.example.com' }), /STOREFRONT_PUBLIC_URL/);
+    assert.throws(() => assertAuthReadyForEnvironment({ NODE_ENV: 'production', CUSTOMER_MFA_ENCRYPTION_KEY: 'too short' }), /CUSTOMER_MFA_ENCRYPTION_KEY/);
+    assert.doesNotThrow(() => assertAuthReadyForEnvironment({ NODE_ENV: 'development', CUSTOMER_MFA_ENCRYPTION_KEY: 'too short' }));
+  });
+
+  it('warnings never contain configured values', () => {
+    const warnings = authStartupWarnings({ NODE_ENV: 'production', STOREFRONT_PUBLIC_URL: 'http://shop.example.com', CUSTOMER_MFA_ENCRYPTION_KEY: 'k'.repeat(40) }, false);
+    assert.ok(warnings.some((w) => /plain http/.test(w)));
+    assert.ok(warnings.some((w) => /No email port/.test(w)));
+    assert.ok(!warnings.join('\n').includes('k'.repeat(40)));
+    assert.deepEqual(authStartupWarnings({ NODE_ENV: 'test', STOREFRONT_ORIGIN: 'http://localhost:3000', CUSTOMER_MFA_ENCRYPTION_KEY: 'k'.repeat(40) }, true), []);
+    assert.ok(authStartupWarnings({ NODE_ENV: 'production' }).some((w) => /STOREFRONT_PUBLIC_URL is unset/.test(w)));
   });
 
   it('AuthModule.onModuleInit enforces it using process.env', () => {
-    const original = process.env.AUTH_BACKEND;
-    delete process.env.AUTH_BACKEND;
-    process.env.NODE_ENV = 'production';
+    const original = { url: process.env.STOREFRONT_PUBLIC_URL, key: process.env.CUSTOMER_MFA_ENCRYPTION_KEY };
     try {
-      assert.throws(() => new AuthModule().onModuleInit());
+      process.env.NODE_ENV = 'production';
+      process.env.STOREFRONT_PUBLIC_URL = 'nope';
+      assert.throws(() => new AuthModule().onModuleInit(), /STOREFRONT_PUBLIC_URL/);
       process.env.NODE_ENV = 'development';
       assert.doesNotThrow(() => new AuthModule().onModuleInit());
     } finally {
-      if (original === undefined) delete process.env.AUTH_BACKEND;
-      else process.env.AUTH_BACKEND = original;
+      if (original.url === undefined) delete process.env.STOREFRONT_PUBLIC_URL;
+      else process.env.STOREFRONT_PUBLIC_URL = original.url;
+      if (original.key === undefined) delete process.env.CUSTOMER_MFA_ENCRYPTION_KEY;
+      else process.env.CUSTOMER_MFA_ENCRYPTION_KEY = original.key;
     }
-  });
-});
-
-describe('AuthService', () => {
-  it('still reports credential-backed operations unavailable (nothing is faked)', () => {
-    const auth = new AuthService();
-    assert.throws(() => auth.login({ email: 'a@example.com', password: 'x' }), { status: 503 });
-    assert.throws(() => auth.register({ email: 'a@example.com', password: 'x' }), { status: 503 });
   });
 });

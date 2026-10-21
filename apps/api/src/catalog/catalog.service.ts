@@ -24,9 +24,13 @@ export class CatalogService {
   private async withCoaState<P extends { lots: Array<{ code: string }> }>(products: P[]): Promise<Array<Omit<P, 'lots'> & { lots: Array<P['lots'][number] & { coaPublished: boolean }> }>> {
     const published = await lotsWithPublishedCoa(this.prisma, products.flatMap((product) => product.lots.map((lot) => lot.code)));
     const required = isPublishedCoaRequired();
-    return products.map((product) => ({
-      ...product,
-      lots: product.lots.map((lot) => ({ ...lot, coaPublished: published.has(lot.code) })).filter((lot) => !required || lot.coaPublished),
-    }));
+    return products.map((product) => {
+      // lowStockThreshold is a back-office alerting setting: it never appears in the public catalog.
+      const { lowStockThreshold: _internalAlertSetting, ...visible } = product as P & { lowStockThreshold?: unknown };
+      return {
+        ...(visible as unknown as Omit<P, 'lots'>),
+        lots: product.lots.map((lot) => ({ ...lot, coaPublished: published.has(lot.code) })).filter((lot) => !required || lot.coaPublished),
+      };
+    });
   }
 }
