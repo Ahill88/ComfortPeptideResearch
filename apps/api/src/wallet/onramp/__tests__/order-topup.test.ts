@@ -65,7 +65,8 @@ test('shortfall of 1.50 USDC rounds UP to 2 whole dollars; response carries the 
   const orderId = addOrder(ctx, customer.id, 250);
   const result = await ctx.service.topUpForOrder(customer.id, orderId);
   assert.ok(result.topUpNeeded);
-  assert.deepEqual(Object.keys(result).sort(), ['intentId', 'orderId', 'quote', 'requiredAtomic', 'shortfallAtomic', 'spendableAtomic', 'status', 'topUpNeeded', 'topUpUsdCents']);
+  assert.deepEqual(Object.keys(result).sort(), ['intentId', 'merchant', 'orderId', 'quote', 'requiredAtomic', 'shortfallAtomic', 'spendableAtomic', 'status', 'topUpNeeded', 'topUpUsdCents']);
+  assert.equal(result.merchant, null, 'no treasury configured in this harness');
   assert.equal(result.requiredAtomic, 2_500_000n);
   assert.equal(result.spendableAtomic, 1_000_000n);
   assert.equal(result.shortfallAtomic, 1_500_000n);
@@ -373,4 +374,19 @@ test('existing createIntent callers are unchanged: no orderId is stored when non
   const { intentId } = await h.onRamp.createIntent(customer.id, { intendedUsdCents: 5_000 });
   const row = h.prisma.onRampIntent.rows.find((r) => r.id === intentId)!;
   assert.equal(row.orderId, undefined);
+});
+
+test('response names the configured merchant treasury so the customer sees who is paid before consenting', async () => {
+  const h = makeHarness();
+  const prisma = h.prisma as FakePrisma & { order: SimpleTable; customerEligibility: SimpleTable };
+  prisma.order = new SimpleTable();
+  prisma.customerEligibility = new SimpleTable();
+  const treasury = '44qaQ4qxPnuPYhAcrtpSgjuffBQBXGGEXBZB6LV8dGsb';
+  const service = new OrderTopUpService(h.db as PrismaService, h.credits, h.onRamp, h.wallets, NO_BUFFER, { treasuryAddress: treasury });
+  const ctx = { h, prisma, service };
+  const { customer } = await customerWith(ctx, 'merchant@example.com', 100);
+  const orderId = addOrder(ctx, customer.id, 250);
+  const result = await service.topUpForOrder(customer.id, orderId);
+  assert.ok(result.topUpNeeded);
+  assert.equal(result.merchant, treasury);
 });

@@ -6,6 +6,8 @@ import { resolveEligibilityRequired } from '../checkout/checkout.service';
 import { KeyedLock } from '../checkout/checkout.util';
 import { CreditsService } from '../credits.service';
 import { WalletService } from '../wallet.service';
+import type { WalletRuntimeConfig } from '../wallet.config';
+import { WALLET_RUNTIME_CONFIG } from '../wallet.tokens';
 import { OnRampService } from './onramp.service';
 
 /** Optional injection token so tests and operators can supply a config object instead of reading process.env. */
@@ -72,6 +74,8 @@ export type OrderTopUpResult =
       topUpUsdCents: number;
       quote: OnRampQuote;
       status: 'CREATED' | 'PENDING';
+      /** The merchant address checkout will pay (the configured treasury), so the customer sees who is paid BEFORE consenting. null when not configured. Informational: prepare is still the authority. */
+      merchant: string | null;
     };
 
 /**
@@ -91,6 +95,7 @@ export class OrderTopUpService {
     private readonly onRamp: OnRampService,
     private readonly wallets: WalletService,
     @Optional() @Inject(ONRAMP_TOPUP_CONFIG) config?: OrderTopUpConfig,
+    @Optional() @Inject(WALLET_RUNTIME_CONFIG) private readonly runtime?: Pick<WalletRuntimeConfig, 'treasuryAddress'>,
   ) {
     this.config = config ?? loadOrderTopUpConfig();
     // Same switch, same rules as CheckoutService: enforced unless NODE_ENV is development/test and the override is set.
@@ -209,6 +214,7 @@ export class OrderTopUpService {
       topUpUsdCents: input.topUpUsdCents,
       quote: input.quote,
       status: input.status === 'PENDING' ? 'PENDING' : 'CREATED',
+      merchant: this.runtime?.treasuryAddress ?? null,
     };
   }
 }

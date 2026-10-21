@@ -27,6 +27,8 @@ import { isNonProductionRuntime } from './config/runtime';
     // Must stay first: it loads .env into process.env before the factories below read it. Warnings are logged once by main.ts.
     ConfigModule.forRoot({
       isGlobal: true,
+      // `pnpm dev:api` runs with apps/api as the working directory, while the example env lives at the repo root.
+      envFilePath: ['.env', '../../.env'],
       validate: (config: Record<string, unknown>) => {
         assertValidEnv(config as Record<string, string | undefined>);
         return config;

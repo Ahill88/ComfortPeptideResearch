@@ -389,13 +389,15 @@ test('order top-up: shortfall -> on-ramp to the customer wallet -> auto-complete
   assert.equal(topUp.shortfallAtomic, 1_500_000n);
   assert.equal(topUp.topUpUsdCents, 200);
   assert.equal(topUp.status, 'CREATED');
+  assert.equal(topUp.merchant, treasury, 'the consent screen can show the exact merchant before the customer agrees');
   assert.equal(topUp.quote.sandbox, true);
   assert.ok(topUp.quote.widgetUrl.length > 0);
 
   // Wire shape: exact contract field names, BigInts as decimal strings, quote shaped like POST /wallet/onramp.
   const raw = await orderTopUpRaw(s.email, s.orderId);
   assert.equal(raw.status, 200);
-  assert.deepEqual(Object.keys(raw.body).sort(), ['intentId', 'orderId', 'quote', 'requiredAtomic', 'shortfallAtomic', 'spendableAtomic', 'status', 'topUpNeeded', 'topUpUsdCents']);
+  assert.deepEqual(Object.keys(raw.body).sort(), ['intentId', 'merchant', 'orderId', 'quote', 'requiredAtomic', 'shortfallAtomic', 'spendableAtomic', 'status', 'topUpNeeded', 'topUpUsdCents']);
+  assert.equal(raw.body.merchant, treasury, 'the wire response names the merchant treasury');
   assert.equal(raw.body.intentId, topUp.intentId, 'repeat is idempotent');
   assert.equal(raw.body.requiredAtomic, '2500000');
   assert.equal(raw.body.spendableAtomic, '1000000');
