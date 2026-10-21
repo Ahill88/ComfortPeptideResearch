@@ -3,6 +3,7 @@ import { PublicKey } from '@solana/web3.js';
 import { createHmac } from 'node:crypto';
 import { isIP } from 'node:net';
 import { OnRampProvider, OnRampQuote, WalletFeatureFlags } from '../contracts';
+import { isNonProductionRuntime } from '../../config/runtime';
 import { WalletRuntimeConfig } from '../wallet.config';
 
 /**
@@ -123,6 +124,27 @@ export function createAllowedIpHash(ip: string, signingSecret: string): string {
   return createHmac('sha256', signingSecret).update(canonical).digest('base64');
 }
 
+/** True for loopback, private (RFC 1918 / ULA) and link-local addresses: addresses MoonPay can never observe from the internet. */
+export function isNonPublicIp(canonical: string): boolean {
+  if (canonical.includes(':')) return canonical === '::1' || canonical === '::' || /^f[cd]/.test(canonical) || /^fe[89ab]/.test(canonical);
+  const [a, b] = canonical.split('.').map(Number);
+  return a === 10 || a === 127 || a === 0 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+}
+
+/**
+ * The IP to bind the widget URL to. Normally the canonical caller IP. DEVELOPMENT/TEST ONLY: when the API sees a non-public
+ * address (a browser on the same machine reaches it over localhost, but MoonPay sees the machine's public IP) and
+ * ONRAMP_DEV_PUBLIC_IP holds a valid public IP, that IP is used instead so the widget can load while developing. The override is
+ * ignored in every other runtime, so it cannot weaken IP matching where it matters.
+ */
+export function resolveWidgetClientIp(customerIp: string | undefined, env: { NODE_ENV?: string; ONRAMP_DEV_PUBLIC_IP?: string } = process.env): string | null {
+  const canonical = customerIp ? canonicalizeCustomerIp(customerIp) : null;
+  if (canonical && !isNonPublicIp(canonical)) return canonical;
+  if (!isNonProductionRuntime(env)) return canonical;
+  const override = env.ONRAMP_DEV_PUBLIC_IP ? canonicalizeCustomerIp(env.ONRAMP_DEV_PUBLIC_IP) : null;
+  return override && !isNonPublicIp(override) ? override : canonical;
+}
+
 @Injectable()
 export class MoonPayOnRampProvider implements OnRampProvider {
   constructor(
@@ -191,7 +213,7 @@ export class MoonPayOnRampProvider implements OnRampProvider {
     ];
     // Only a real IP literal is bound, in MoonPay's canonical form; anything else (empty, junk, a list, a crafted string) is
     // dropped, never hashed. Omitting the parameter makes MoonPay skip IP enforcement for the session (documented).
-    const canonicalIp = input.customerIp ? canonicalizeCustomerIp(input.customerIp) : null;
+    const canonicalIp = resolveWidgetClientIp(input.customerIp);
     if (canonicalIp) params.push(['allowedIpAddress', createAllowedIpHash(canonicalIp, signingSecret)]);
     // Values are URL-encoded BEFORE signing; the signature covers exactly the bytes we send.
     const query = '?' + params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');

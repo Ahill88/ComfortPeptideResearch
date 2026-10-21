@@ -9,7 +9,7 @@ import { SandboxSolanaChain } from '../chain/sandbox-solana-chain';
 import { ChainUnavailableError, centsToAtomic } from '../contracts';
 import { readCustomerEmail } from '../customer-identity';
 import { createHmac } from 'node:crypto';
-import { canonicalizeCustomerIp, createAllowedIpHash, createMoonPayUrlSignature, MoonPayOnRampProvider } from '../onramp/moonpay-onramp.provider';
+import { canonicalizeCustomerIp, createAllowedIpHash, isNonPublicIp, resolveWidgetClientIp, createMoonPayUrlSignature, MoonPayOnRampProvider } from '../onramp/moonpay-onramp.provider';
 import { findSecretFields } from '../secret-fields';
 import { loadRuntimeConfig } from '../wallet.config';
 import { toJsonSafe } from '../wallet.http';
@@ -351,4 +351,28 @@ test('sandbox chain is deterministic and simulates outage', async () => {
   chain.setOutage(true);
   await assert.rejects(chain.getFinalizedUsdcBalance(owner), ChainUnavailableError);
   await assert.rejects(chain.broadcast(new Uint8Array(1)), ChainUnavailableError);
+});
+
+test('resolveWidgetClientIp: the development override applies only to non-public addresses and only in development/test', () => {
+  const dev = { NODE_ENV: 'development', ONRAMP_DEV_PUBLIC_IP: '159.242.255.169' };
+  // Loopback/private callers (browser and API on one machine) take the override in development and test.
+  for (const local of ['::1', '127.0.0.1', '::ffff:127.0.0.1', '192.168.1.20', '10.0.0.4', 'fd00::1']) {
+    assert.equal(resolveWidgetClientIp(local, dev), '159.242.255.169', local);
+    assert.equal(resolveWidgetClientIp(local, { ...dev, NODE_ENV: 'test' }), '159.242.255.169', local);
+  }
+  // A real public caller is never replaced.
+  assert.equal(resolveWidgetClientIp('203.0.113.9', dev), '203.0.113.9');
+  assert.equal(resolveWidgetClientIp('2001:0DB8::1', dev), '2001:db8::1');
+  // Outside development/test the override is ignored in every form (unset, empty, other, look-alike values).
+  for (const nodeEnv of [undefined, '', 'production', 'prod', 'staging', 'Production', 'production ', 'Development']) {
+    assert.equal(resolveWidgetClientIp('127.0.0.1', { NODE_ENV: nodeEnv, ONRAMP_DEV_PUBLIC_IP: '159.242.255.169' }), '127.0.0.1', String(nodeEnv));
+  }
+  // An override that is not a valid public IP is ignored; no override leaves the caller IP as is.
+  assert.equal(resolveWidgetClientIp('127.0.0.1', { NODE_ENV: 'development', ONRAMP_DEV_PUBLIC_IP: '10.1.1.1' }), '127.0.0.1');
+  assert.equal(resolveWidgetClientIp('127.0.0.1', { NODE_ENV: 'development', ONRAMP_DEV_PUBLIC_IP: '?x=1' }), '127.0.0.1');
+  assert.equal(resolveWidgetClientIp('127.0.0.1', { NODE_ENV: 'development' }), '127.0.0.1');
+  assert.equal(resolveWidgetClientIp(undefined, { NODE_ENV: 'development' }), null);
+  assert.equal(resolveWidgetClientIp('junk', dev), '159.242.255.169', 'junk becomes non-public and takes the development override');
+  for (const pub of ['8.8.8.8', '2001:db8::1', '172.32.0.1', '100.63.0.1']) assert.equal(isNonPublicIp(pub), false, pub);
+  for (const priv of ['127.0.0.1', '10.2.3.4', '172.16.0.1', '172.31.255.255', '192.168.0.1', '169.254.1.1', '100.64.0.1', '::1', 'fe80::1', 'fc00::1']) assert.equal(isNonPublicIp(priv), true, priv);
 });

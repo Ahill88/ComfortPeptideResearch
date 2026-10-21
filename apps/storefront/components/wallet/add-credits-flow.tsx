@@ -75,7 +75,7 @@ function Flow() {
   return <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
     <section className={cardClass} aria-labelledby="amount-heading">
       <p className={eyebrowClass}>STEP 1</p><h2 id="amount-heading" className="mt-3 text-3xl tracking-tight">Choose an amount</h2>
-      <p className="mt-3 text-sm leading-7 text-slate-600">Amount in US dollars you plan to spend (with a real MoonPay quote; in the sandbox the deposit is simulated). 1 Research Credit = 1 USDC of available value, shown after funds arrive on-chain.</p>
+      <p className="mt-3 text-sm leading-7 text-slate-600">Whole dollars of credit to buy: each $1 buys 1 USDC. With a real MoonPay purchase you buy that fixed amount of USDC and MoonPay adds its fees on top, shown by MoonPay before you confirm. 1 Research Credit = 1 USDC of available value, shown after funds arrive on-chain.</p>
       <fieldset className="mt-6" disabled={quote !== null}><legend className="sr-only">Preset amounts</legend>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">{PRESETS_CENTS.map((preset) => {
           const active = !custom.trim() && selected === preset;
@@ -105,7 +105,7 @@ function Flow() {
           {mode === 'manual-devnet' ? <ManualDevnetFunding address={wallet.address} context="add-credits" /> : <>
             <dl className="divide-y divide-silver border-y border-silver text-sm">
               <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Provider</dt><dd>{quote.provider}{quote.sandbox ? ' (sandbox)' : ''}</dd></div>
-              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Amount</dt><dd>${quoteCents !== null ? formatCents(quoteCents) : ''} USD</dd></div>
+              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">USDC to buy</dt><dd>{quoteCents !== null ? formatCents(quoteCents) : ''} USDC (1 USDC per $1; provider fees are added on top)</dd></div>
               {quote.estimatedFeeUsdCents !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated provider fee</dt><dd>${formatCents(quote.estimatedFeeUsdCents)}</dd></div> : null}
               {quote.estimatedUsdcAtomic !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated USDC</dt><dd className="font-mono">{formatUsdc(quote.estimatedUsdcAtomic)}</dd></div> : null}
             </dl>
