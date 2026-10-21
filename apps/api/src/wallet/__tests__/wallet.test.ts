@@ -8,8 +8,8 @@ import { createSolanaChain } from '../chain/chain.factory';
 import { SandboxSolanaChain } from '../chain/sandbox-solana-chain';
 import { ChainUnavailableError, centsToAtomic } from '../contracts';
 import { readCustomerEmail } from '../customer-identity';
-import { createHash, createHmac } from 'node:crypto';
-import { createAllowedIpHash, createMoonPayUrlSignature, MoonPayOnRampProvider } from '../onramp/moonpay-onramp.provider';
+import { createHmac } from 'node:crypto';
+import { canonicalizeCustomerIp, createAllowedIpHash, createMoonPayUrlSignature, MoonPayOnRampProvider } from '../onramp/moonpay-onramp.provider';
 import { findSecretFields } from '../secret-fields';
 import { loadRuntimeConfig } from '../wallet.config';
 import { toJsonSafe } from '../wallet.http';
@@ -220,18 +220,21 @@ test('real MoonPay quote builds a signed URL with only verified parameters', asy
   assert.match(quote.disclosures.join(' '), /MoonPay .*identity verification/i);
 });
 
-test('allowedIpAddress never reuses the URL-signing key as an oracle: it is not HMAC(signingSecret, ip) and cannot be a valid URL signature', async () => {
+test('allowedIpAddress follows MoonPay\'s documented scheme: base64(HMAC-SHA256(secretKey, canonicalIp)), with the same key that signs the URL', async () => {
   const secret = 'sk_test_abc';
   const ip = '203.0.113.9';
   const hash = createAllowedIpHash(ip, secret);
-  assert.notEqual(hash, createHmac('sha256', secret).update(ip).digest('base64'), 'must not be the raw signing-key MAC of the IP');
-  assert.notEqual(hash, createMoonPayUrlSignature(ip, secret));
-  assert.notEqual(hash, createHash('sha256').update(ip).digest('base64'), 'keyed (the IP space is tiny, a bare hash is brute-forceable)');
+  // MoonPay recomputes exactly this from the IP it observes (https://dev.moonpay.com/widget/on-ramp/customization/ip-matching.md).
+  assert.equal(hash, createHmac('sha256', secret).update(ip).digest('base64'));
   assert.equal(hash, createAllowedIpHash(ip, secret), 'deterministic');
   assert.notEqual(hash, createAllowedIpHash('203.0.113.10', secret));
   assert.notEqual(hash, createAllowedIpHash(ip, 'sk_test_other'));
   assert.ok(!hash.includes(ip));
-  // Sanity: the documented URL-signing vector is unaffected by the IP key derivation.
+  // Not an oracle: URL signatures are always over a query string starting with "?", and canonical IP literals never can.
+  assert.throws(() => createAllowedIpHash('?apiKey=pk_test_abc&walletAddress=attacker', secret));
+  assert.throws(() => createAllowedIpHash('not-an-ip', secret));
+  assert.throws(() => createAllowedIpHash('::FFFF:203.0.113.9', secret), 'non-canonical input is refused, not silently re-hashed');
+  // The documented URL-signing vector is unaffected.
   assert.equal(createMoonPayUrlSignature('?apiKey=pk_test_DocsVector00&currencyCode=eth&walletAddress=0xde0B295669a9FD93d5F28D9Ec85E40f4cb697BAe', 'sk_test_DocsVector00'), 'oIJxSghyzll/BLhUFdQZhkxf7DAS8REFaWr/ibO+K8Q=');
 
   const provider = new MoonPayOnRampProvider({ ...FLAGS, enableRealMoonpay: true }, makeConfig({ moonpayPublishableKey: 'pk_test_abc', moonpaySigningSecret: secret, treasuryAddress: addr() }));
@@ -240,12 +243,42 @@ test('allowedIpAddress never reuses the URL-signing key as an oracle: it is not 
   const p = new URL(quote.widgetUrl).searchParams;
   assert.equal(p.get('allowedIpAddress'), hash);
   const signed = quote.widgetUrl.slice(quote.widgetUrl.indexOf('?'), quote.widgetUrl.indexOf('&signature='));
-  assert.equal(p.get('signature'), createMoonPayUrlSignature(signed, secret), 'URL signing is unchanged');
+  assert.equal(p.get('signature'), createMoonPayUrlSignature(signed, secret), 'URL signing covers allowedIpAddress');
+  // Express reports IPv4 clients as ::ffff:a.b.c.d: it must be unmapped before hashing, or MoonPay's comparison fails.
+  const mapped = new URL((await provider.createQuote({ ...input, customerIp: '::ffff:203.0.113.9' })).widgetUrl).searchParams;
+  assert.equal(mapped.get('allowedIpAddress'), hash);
   // A crafted non-IP string is dropped entirely: the provider never MACs attacker-chosen text.
-  for (const crafted of ['?apiKey=pk_test_abc&walletAddress=attacker', 'not-an-ip', '203.0.113.9, 198.51.100.1', '']) {
+  for (const crafted of ['?apiKey=pk_test_abc&walletAddress=attacker', 'not-an-ip', '203.0.113.9, 198.51.100.1', '', '203.0.113.09', 'fe80::1%eth0']) {
     const dropped = new URL((await provider.createQuote({ ...input, customerIp: crafted })).widgetUrl).searchParams;
     assert.equal(dropped.has('allowedIpAddress'), false, crafted);
   }
+});
+
+test('canonicalizeCustomerIp implements MoonPay\'s documented canonicalization rules', () => {
+  const cases: Array<[string, string | null]> = [
+    ['203.0.113.42', '203.0.113.42'],
+    ['203.0.113.42:8080', '203.0.113.42'],
+    ['::ffff:203.0.113.42', '203.0.113.42'],
+    ['[::ffff:203.0.113.42]:443', '203.0.113.42'],
+    ['::FFFF:cb00:712a', '203.0.113.42'],
+    ['2001:0DB8:0000:0000:0000:0000:0000:0001', '2001:db8::1'], // the documentation's own example
+    ['[2001:db8::1]:443', '2001:db8::1'],
+    ['2001:db8::1', '2001:db8::1'],
+    ['2001:db8:0:0:1:0:0:1', '2001:db8::1:0:0:1'], // RFC 5952: compress the longest run, the first on a tie
+    ['2001:db8:0:1:1:1:1:1', '2001:db8:0:1:1:1:1:1'], // a single zero group is not compressed
+    ['0:0:0:0:0:0:0:1', '::1'],
+    ['::', '::'],
+    ['2001:DB8::1', '2001:db8::1'],
+    ['1:2:3:4:5:6:7::', '1:2:3:4:5:6:7:0'], // RFC 5952 4.2.2: "::" must not shorten a single zero group
+    ['203.0.113.042', null], // leading zero: ambiguous octal, refused
+    ['256.1.1.1', null],
+    ['fe80::1%eth0', null],
+    ['203.0.113.9, 198.51.100.1', null],
+    ['?x=1', null],
+    ['', null],
+    ['hello', null],
+  ];
+  for (const [input, expected] of cases) assert.equal(canonicalizeCustomerIp(input), expected, `canonicalize(${JSON.stringify(input)})`);
 });
 
 test('real MoonPay fails closed on missing keys, live key without mainnet, fractional dollars, treasury', async () => {

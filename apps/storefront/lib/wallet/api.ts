@@ -73,6 +73,11 @@ export type WalletTransaction = {
 export type OnrampQuote = {
   provider: string;
   sandbox: boolean;
+  /**
+   * True only when the API says "Simulate MoonPay deposit" can work right now (in-memory sandbox chain, sandbox quote).
+   * false when the API omits it: an API that predates the field never shows the button.
+   */
+  simulationAvailable: boolean;
   widgetUrl: string;
   estimatedFeeUsdCents: number | null;
   estimatedUsdcAtomic: bigint | null;
@@ -149,6 +154,21 @@ export function normalizeBalance(raw: unknown): WalletBalance {
   return { finalizedAtomic, spendableAtomic, researchCredits: spendableAtomic / 1_000_000n, stale: r.stale === true };
 }
 
+/** `quote` object of POST /wallet/onramp and POST /wallet/onramp/order-topup -> OnrampQuote. Only an explicit `true` enables simulation. */
+export function normalizeOnrampQuote(rawQuote: unknown, intentId: string): OnrampQuote {
+  const quote = asRecord(rawQuote);
+  return {
+    provider: asString(quote.provider) ?? 'moonpay',
+    sandbox: quote.sandbox === true,
+    simulationAvailable: quote.simulationAvailable === true,
+    widgetUrl: asString(quote.widgetUrl) ?? '',
+    estimatedFeeUsdCents: asCents(quote.estimatedFeeUsdCents),
+    estimatedUsdcAtomic: optionalAtomic(quote.estimatedUsdcAtomic),
+    disclosures: asStrings(quote.disclosures),
+    intentId,
+  };
+}
+
 export function normalizeOrderTopUp(raw: unknown): OrderTopUp {
   const r = asRecord(raw);
   const orderId = requireString(r.orderId);
@@ -161,7 +181,6 @@ export function normalizeOrderTopUp(raw: unknown): OrderTopUp {
   // A top-up that is needed must have a positive shortfall and a positive amount; anything else is not safe to show as an offer.
   if (shortfallAtomic <= 0n || topUpUsdCents === null || topUpUsdCents <= 0) throw malformed();
   const intentId = requireString(r.intentId);
-  const quote = asRecord(r.quote);
   const status = asString(r.status);
   return {
     topUpNeeded: true,
@@ -171,15 +190,7 @@ export function normalizeOrderTopUp(raw: unknown): OrderTopUp {
     spendableAtomic,
     shortfallAtomic,
     topUpUsdCents,
-    quote: {
-      provider: asString(quote.provider) ?? 'moonpay',
-      sandbox: quote.sandbox === true,
-      widgetUrl: asString(quote.widgetUrl) ?? '',
-      estimatedFeeUsdCents: asCents(quote.estimatedFeeUsdCents),
-      estimatedUsdcAtomic: optionalAtomic(quote.estimatedUsdcAtomic),
-      disclosures: asStrings(quote.disclosures),
-      intentId,
-    },
+    quote: normalizeOnrampQuote(r.quote, intentId),
     status: status === 'PENDING' ? 'PENDING' : 'CREATED',
     merchant: asString(r.merchant),
   };
@@ -276,16 +287,7 @@ export async function fetchTransactions(email: string, signal?: AbortSignal): Pr
 export async function createOnrampQuote(email: string, usdAmountCents: number): Promise<OnrampQuote> {
   // API contract: POST /wallet/onramp { amountUsdCents } -> { intentId, status, quote: { provider, sandbox, widgetUrl, ... } }
   const r = asRecord(await apiRequest('/wallet/onramp', { method: 'POST', email, body: { amountUsdCents: usdAmountCents } }));
-  const quote = asRecord(r.quote);
-  return {
-    provider: asString(quote.provider) ?? 'moonpay',
-    sandbox: quote.sandbox === true,
-    widgetUrl: asString(quote.widgetUrl) ?? '',
-    estimatedFeeUsdCents: asCents(quote.estimatedFeeUsdCents),
-    estimatedUsdcAtomic: optionalAtomic(quote.estimatedUsdcAtomic),
-    disclosures: asStrings(quote.disclosures),
-    intentId: requireString(r.intentId),
-  };
+  return normalizeOnrampQuote(r.quote, requireString(r.intentId));
 }
 
 /**

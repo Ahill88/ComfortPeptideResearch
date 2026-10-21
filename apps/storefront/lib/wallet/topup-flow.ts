@@ -25,7 +25,51 @@ export type WidgetOpenResult =
   | { status: 'blocked' }
   | { status: 'unavailable' };
 
-/** What the customer sees about the widget. 'sandbox' = no real provider; 'resumed' = reloaded, no window to point at. */
+/**
+ * How a customer can actually add funds for an on-ramp quote:
+ *  - 'simulate':      the API says the in-memory sandbox chain can be credited (quote.simulationAvailable). Shows "Simulate MoonPay deposit".
+ *  - 'widget':        a real MoonPay widget (https) is opened. This includes MoonPay's own sandbox host; that is a real provider page.
+ *  - 'manual-devnet': the API returned its LOCAL sandbox quote (provider 'moonpay-sandbox') but cannot simulate (it is on real
+ *                     Solana devnet and real MoonPay is off). Nothing can be bought or simulated; the customer sends devnet USDC to their wallet.
+ * Pure. The button is shown only for 'simulate', which requires quote.sandbox AND an explicit simulationAvailable === true.
+ */
+export type FundingMode = 'simulate' | 'widget' | 'manual-devnet';
+
+export const FUNDING_MODES: readonly FundingMode[] = ['simulate', 'widget', 'manual-devnet'];
+
+export function quoteFundingMode(quote: { provider?: string; sandbox: boolean; simulationAvailable?: boolean }): FundingMode {
+  if (quote.sandbox && quote.simulationAvailable === true) return 'simulate';
+  if (quote.sandbox && quote.provider === 'moonpay-sandbox') return 'manual-devnet';
+  return 'widget';
+}
+
+/** A plan or record written before `funding` existed: sandbox meant "simulate", anything else meant "widget". */
+export function fundingOf(source: { sandbox: boolean; funding?: FundingMode | null }): FundingMode {
+  return source.funding ?? (source.sandbox ? 'simulate' : 'widget');
+}
+
+export const CIRCLE_FAUCET_URL = 'https://faucet.circle.com';
+export const SOLANA_FAUCET_URL = 'https://faucet.solana.com';
+
+/**
+ * Copy for the 'manual-devnet' state. Honest by construction: it never mentions buying, cards, banks or a MoonPay purchase
+ * (none is happening), and it makes no claim about how much a faucet gives or how long it takes.
+ * The wallet address and the Copy address control are rendered by the component next to `sendTo`.
+ */
+export function manualDevnetCopy(context: 'add-credits' | 'checkout') {
+  return {
+    title: 'MoonPay is not connected in this environment',
+    intro: 'MoonPay is not connected in this environment, and simulated deposits only work on the in-memory sandbox chain. This wallet is on Solana devnet. To add test credits, send devnet USDC to your wallet address:',
+    sendTo: 'Your wallet address',
+    usdcStep: { before: 'Get devnet USDC from the Circle faucet: choose Solana and USDC, then paste your wallet address.', linkLabel: 'faucet.circle.com', url: CIRCLE_FAUCET_URL },
+    solNote: { before: 'Devnet SOL is not needed to pay at checkout when the platform pays the network fee, but it is needed for withdrawals. Get devnet SOL from', linkLabel: 'faucet.solana.com', url: SOLANA_FAUCET_URL },
+    watch: context === 'checkout'
+      ? 'This page keeps checking your finalized balance. When enough devnet USDC reaches your wallet address (from the faucet or any other sender), it continues and pays this order automatically; you can cancel before then and nothing is signed.'
+      : 'This page keeps checking your finalized balance. Credits appear once the devnet USDC has arrived on-chain.',
+  };
+}
+
+/** What the customer sees about the widget. 'sandbox' = no provider window is involved (simulate or manual devnet); 'resumed' = reloaded, no window to point at. */
 export type WidgetStatus = 'not-opened' | 'opened' | 'closed' | 'blocked' | 'unavailable' | 'sandbox' | 'resumed';
 
 export type PreparedPayment = {
@@ -96,7 +140,10 @@ export type TopUpPlan = {
   /** When the customer ticked and confirmed the up-front consent (epoch ms). null/undefined = no consent given. */
   consentedAt: number | null;
   widgetUrl: string | null;
+  /** Legacy flag: true = no real provider window. `funding` (when set) is authoritative; see fundingOf. */
   sandbox: boolean;
+  /** How funds are added. When omitted it is derived from `sandbox` (true = 'simulate'). Only 'widget' opens a provider window. */
+  funding?: FundingMode;
   /** Merchant address shown before consent, if the API provided one. When set, a prepared payment to any other address is refused. */
   merchant: string | null;
   /** Set when a previous page load already started the pay step. Such a plan never auto-pays again. */
@@ -168,6 +215,8 @@ export type TopUpRecord = {
   payStartedAt: number | null;
   /** Sandbox quotes have no real widget; the sandbox "simulate deposit" control must be offered again after a reload. */
   sandbox: boolean;
+  /** How funds are added, so a reload shows the same panel (never a simulate button the API refused). Absent in older records: derived from `sandbox`. */
+  funding: FundingMode;
 };
 
 export type TopUpStore = {
@@ -196,6 +245,7 @@ export function parseTopUpRecord(raw: string | null): TopUpRecord | null {
   return {
     v: 1, email: r.email, orderId: r.orderId, intentId: r.intentId, requiredAtomic: r.requiredAtomic,
     baselineSpendableAtomic: r.baselineSpendableAtomic as string | null, consentedAt: r.consentedAt, payStartedAt: r.payStartedAt as number | null, sandbox: r.sandbox === true,
+    funding: FUNDING_MODES.includes(r.funding as FundingMode) ? (r.funding as FundingMode) : r.sandbox === true ? 'simulate' : 'widget',
   };
 }
 
@@ -228,6 +278,7 @@ export function findResumableTopUp(store: TopUpStore, email: string, nowMs: numb
       consentedAt: record.consentedAt,
       widgetUrl: null,
       sandbox: record.sandbox,
+      funding: record.funding,
       merchant: null,
       payStartedAt: record.payStartedAt,
     },
@@ -292,7 +343,7 @@ export function createTopUpRun<P extends PreparedPayment>(
   function record(payStartedAt: number | null): TopUpRecord {
     return {
       v: 1, email: account, orderId: plan.orderId, intentId: plan.intentId, requiredAtomic: plan.requiredAtomic.toString(),
-      baselineSpendableAtomic: baseline === null ? null : baseline.toString(), consentedAt: plan.consentedAt as number, payStartedAt, sandbox: plan.sandbox,
+      baselineSpendableAtomic: baseline === null ? null : baseline.toString(), consentedAt: plan.consentedAt as number, payStartedAt, sandbox: plan.sandbox, funding: fundingOf(plan),
     };
   }
 
@@ -403,7 +454,7 @@ export function createTopUpRun<P extends PreparedPayment>(
       if (begin().kind !== 'idle') return state;
       // 1) Remember the consent so a reload/closed tab can resume. 2) Open the widget inside the click. 3) Poll.
       persisted = store ? store.save(record(null)) : false;
-      if (plan.sandbox) widget = 'sandbox';
+      if (fundingOf(plan) !== 'widget') widget = 'sandbox';
       else {
         const opened = plan.widgetUrl ? deps.openWidget(plan.widgetUrl) : ({ status: 'unavailable' } as const);
         if (opened.status === 'unavailable') { stopped = true; store?.clear(); emit({ kind: 'widget-unavailable' }); return state; }
@@ -418,7 +469,7 @@ export function createTopUpRun<P extends PreparedPayment>(
     resume() {
       if (begin().kind !== 'idle') return state;
       persisted = store ? store.save(record(null)) : false;
-      widget = plan.sandbox ? 'sandbox' : 'resumed';
+      widget = fundingOf(plan) !== 'widget' ? 'sandbox' : 'resumed';
       deadlineAt = deps.now() + opt.timeoutMs;
       emit({ kind: 'waiting', progress: progress() });
       launch();

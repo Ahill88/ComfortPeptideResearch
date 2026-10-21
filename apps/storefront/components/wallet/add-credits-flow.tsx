@@ -7,8 +7,10 @@ import { ExternalLink, FlaskConical } from 'lucide-react';
 import { useWallet } from './wallet-provider';
 import { buttonClass, cardClass, eyebrowClass, inputClass, Notice, primaryButtonClass, ServiceNotice, Spinner, WalletGate } from './ui';
 import { WalletDisclosures } from './wallet-disclosures';
+import { ManualDevnetFunding } from './manual-devnet-funding';
 import { createOnrampQuote, errorMessage, mockCompleteOnramp, type OnrampQuote } from '../../lib/wallet/api';
 import { formatCents, formatUsdc, formatWholeNumber, parseUsdToCents, researchCredits } from '../../lib/wallet/credits';
+import { quoteFundingMode } from '../../lib/wallet/topup-flow';
 
 const PRESETS_CENTS = [2500, 5000, 10000, 25000];
 const WATCH_INTERVAL_MS = 5000;
@@ -65,7 +67,9 @@ function Flow() {
   };
 
   const reset = () => { setQuote(null); setBaseline(null); setDeposited(null); setSimulated(false); setError(null); };
-  const widget = quote && !quote.sandbox ? safeWidgetUrl(quote.widgetUrl) : null;
+  // 'simulate' only when the API said so; 'manual-devnet' = API on real devnet without MoonPay (no button, funding instructions instead).
+  const mode = quote ? quoteFundingMode(quote) : null;
+  const widget = quote && mode === 'widget' ? safeWidgetUrl(quote.widgetUrl) : null;
   const motionProps = reduce ? {} : { initial: { opacity: 0, y: 8 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -8 }, transition: { duration: 0.2 } };
 
   return <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
@@ -98,20 +102,22 @@ function Flow() {
           <div className="flex flex-wrap gap-3"><Link href="/account/wallet" className={primaryButtonClass}>Back to wallet</Link><button type="button" className={buttonClass} onClick={reset}>Add more</button></div>
         </motion.div>
         : <motion.div key="quote" {...motionProps} className="mt-5 space-y-5">
-          <dl className="divide-y divide-silver border-y border-silver text-sm">
-            <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Provider</dt><dd>{quote.provider}{quote.sandbox ? ' (sandbox)' : ''}</dd></div>
-            <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Amount</dt><dd>${quoteCents !== null ? formatCents(quoteCents) : ''} USD</dd></div>
-            {quote.estimatedFeeUsdCents !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated provider fee</dt><dd>${formatCents(quote.estimatedFeeUsdCents)}</dd></div> : null}
-            {quote.estimatedUsdcAtomic !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated USDC</dt><dd className="font-mono">{formatUsdc(quote.estimatedUsdcAtomic)}</dd></div> : null}
-          </dl>
-          {quote.estimatedUsdcAtomic !== null ? <p className="text-xs leading-6 text-slate-500">Estimate supplied by the provider. The amount that arrives may differ.</p> : <p className="text-xs leading-6 text-slate-500">The provider has not quoted a USDC amount. Fees and the final USDC received are set by MoonPay.</p>}
-          {quote.disclosures.length ? <ul className="space-y-2 text-xs leading-6 text-slate-700">{quote.disclosures.map((d) => <li key={d} className="rounded-lg bg-porcelain p-3">{d}</li>)}</ul> : null}
-          {quote.sandbox ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
-            <p className="flex items-center gap-2 text-sm font-semibold text-amber-900"><FlaskConical size={16} aria-hidden="true" />SANDBOX SIMULATION</p>
-            <p className="mt-2 text-xs leading-6 text-amber-900">This is not MoonPay. No identity check, card payment or real funds are involved. The button asks the sandbox API to simulate a deposit of devnet USDC to your wallet.</p>
-            <button type="button" className={`${primaryButtonClass} mt-4`} disabled={busy || simulated} onClick={simulate}>{simulated ? 'Simulation requested' : busy ? 'Simulating...' : 'Simulate MoonPay deposit'}</button>
-          </div> : widget ? <a href={widget} target="_blank" rel="noopener noreferrer" className={primaryButtonClass}>Continue to MoonPay <ExternalLink size={14} aria-hidden="true" /></a> : <Notice tone="error">The provider did not return a secure (https) payment link, so it was not opened.</Notice>}
-          <div className="rounded-xl border border-silver bg-porcelain p-4"><Spinner label="Waiting for a finalized balance increase..." /><p className="mt-2 text-xs leading-6 text-slate-600"><b>Credits appear after USDC arrives on-chain.</b> A completed checkout or simulation alone does not add credits; we only show them once your finalized wallet balance rises.</p></div>
+          {mode === 'manual-devnet' ? <ManualDevnetFunding address={wallet.address} context="add-credits" /> : <>
+            <dl className="divide-y divide-silver border-y border-silver text-sm">
+              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Provider</dt><dd>{quote.provider}{quote.sandbox ? ' (sandbox)' : ''}</dd></div>
+              <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Amount</dt><dd>${quoteCents !== null ? formatCents(quoteCents) : ''} USD</dd></div>
+              {quote.estimatedFeeUsdCents !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated provider fee</dt><dd>${formatCents(quote.estimatedFeeUsdCents)}</dd></div> : null}
+              {quote.estimatedUsdcAtomic !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated USDC</dt><dd className="font-mono">{formatUsdc(quote.estimatedUsdcAtomic)}</dd></div> : null}
+            </dl>
+            {quote.estimatedUsdcAtomic !== null ? <p className="text-xs leading-6 text-slate-500">Estimate supplied by the provider. The amount that arrives may differ.</p> : <p className="text-xs leading-6 text-slate-500">The provider has not quoted a USDC amount. Fees and the final USDC received are set by MoonPay.</p>}
+            {quote.disclosures.length ? <ul className="space-y-2 text-xs leading-6 text-slate-700">{quote.disclosures.map((d) => <li key={d} className="rounded-lg bg-porcelain p-3">{d}</li>)}</ul> : null}
+            {mode === 'simulate' ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+              <p className="flex items-center gap-2 text-sm font-semibold text-amber-900"><FlaskConical size={16} aria-hidden="true" />SANDBOX SIMULATION</p>
+              <p className="mt-2 text-xs leading-6 text-amber-900">This is not MoonPay. No identity check, card payment or real funds are involved. The button asks the sandbox API to simulate a deposit of devnet USDC to your wallet.</p>
+              <button type="button" className={`${primaryButtonClass} mt-4`} disabled={busy || simulated} onClick={simulate}>{simulated ? 'Simulation requested' : busy ? 'Simulating...' : 'Simulate MoonPay deposit'}</button>
+            </div> : widget ? <a href={widget} target="_blank" rel="noopener noreferrer" className={primaryButtonClass}>Continue to MoonPay <ExternalLink size={14} aria-hidden="true" /></a> : <Notice tone="error">The provider did not return a secure (https) payment link, so it was not opened.</Notice>}
+          </>}
+          <div className="rounded-xl border border-silver bg-porcelain p-4"><Spinner label="Waiting for a finalized balance increase..." /><p className="mt-2 text-xs leading-6 text-slate-600"><b>Credits appear after USDC arrives on-chain.</b> {mode === 'manual-devnet' ? 'We only show them once your finalized wallet balance rises.' : 'A completed checkout or simulation alone does not add credits; we only show them once your finalized wallet balance rises.'}</p></div>
           <button type="button" className={buttonClass} onClick={reset}>Cancel and start over</button>
           {error ? <Notice tone="error">{error}</Notice> : null}
         </motion.div>}

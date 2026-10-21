@@ -3,6 +3,9 @@ import { createSolanaChain } from './chain/chain.factory';
 import { CreditsService } from './credits.service';
 import { loadFeatureFlags, WalletFeatureFlags } from './contracts';
 import { MoonPayOnRampProvider } from './onramp/moonpay-onramp.provider';
+import { loadMoonPayWebhookConfig, MOONPAY_WEBHOOK_CONFIG } from './onramp/moonpay-webhook.config';
+import { MoonPayWebhookController } from './onramp/moonpay-webhook.controller';
+import { MoonPayWebhookService } from './onramp/moonpay-webhook.service';
 import { OnRampService } from './onramp/onramp.service';
 import { OrderTopUpService } from './onramp/order-topup.service';
 import { AllowAllComplianceScreen } from './transfers/compliance-screen';
@@ -29,7 +32,7 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
  * must be replaced for production.
  */
 @Module({
-  controllers: [WalletController],
+  controllers: [WalletController, MoonPayWebhookController],
   providers: [
     { provide: WALLET_FEATURE_FLAGS, useFactory: () => loadFeatureFlags() },
     { provide: WALLET_RUNTIME_CONFIG, useFactory: () => loadRuntimeConfig() },
@@ -43,6 +46,9 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
       inject: [WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG],
       useFactory: (flags: WalletFeatureFlags, config: WalletRuntimeConfig) => new MoonPayOnRampProvider(flags, config),
     },
+    // MoonPay buy webhook receiver (POST /v1/webhooks/moonpay): signature-authenticated, updates intent status + audit only.
+    { provide: MOONPAY_WEBHOOK_CONFIG, useFactory: () => loadMoonPayWebhookConfig() },
+    MoonPayWebhookService,
     { provide: PREPARED_TX_STORE, useFactory: () => createPreparedTransactionStore() },
     { provide: COMPLIANCE_SCREEN, useFactory: () => new AllowAllComplianceScreen() },
     WalletService,

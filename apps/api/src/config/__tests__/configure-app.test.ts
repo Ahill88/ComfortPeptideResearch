@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { Body, Controller, Get, INestApplication, Post, ValidationPipe } from '@nestjs/common';
+import { createHmac } from 'node:crypto';
+import { Body, Controller, Get, INestApplication, Post, Req, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { Test } from '@nestjs/testing';
@@ -14,6 +15,11 @@ class StubController {
   @Post('echo') echo(@Body() body: Record<string, unknown>) { return { size: JSON.stringify(body).length }; }
   @Post('auth/login') login() { return { ok: true }; }
   @Post('wallet/transfers/prepare') prepare() { return { ok: true }; }
+  /** Reports what a handler sees for the MoonPay webhook route: the body must be the untouched raw bytes. */
+  @Post('webhooks/moonpay') hook(@Req() req: { body: unknown }) {
+    return Buffer.isBuffer(req.body) ? { raw: true, text: req.body.toString('utf8'), length: req.body.length } : { raw: false };
+  }
+  @Post('webhooks/other') other(@Req() req: { body: unknown }) { return { raw: Buffer.isBuffer(req.body), body: req.body }; }
 }
 
 /** Loopback-only HTTP: boots the real configureApp() against a stub controller. No DB, Redis or external network. */
@@ -177,4 +183,50 @@ test('with TRUST_PROXY=1 the nearest proxy-supplied client address becomes the t
 
 test('configureApp refuses TRUST_PROXY=true', async () => {
   await assert.rejects(boot({ ...dev, TRUST_PROXY: 'true' }), /TRUST_PROXY=true/);
+});
+
+test('MoonPay webhook route receives the exact raw bytes: a MAC over them verifies, a re-serialised body would not; other routes still get parsed JSON', async () => {
+  const { app, base } = await boot(dev);
+  try {
+    const key = 'whk-test';
+    const mac = (message: string) => createHmac('sha256', key).update(message).digest('hex');
+    // pretty-printed, odd spacing, unicode escape: JSON.parse + JSON.stringify cannot reproduce these bytes
+    const raw = '{ "type" : "transaction_updated",\n  "data":{"id":"abc","note":"\\u00e9"} }';
+    const timestamp = '1800000000';
+    const send = (path: string, body: string, contentType = 'application/json') => fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': contentType }, body });
+
+    const res = await send('/v1/webhooks/moonpay', raw);
+    assert.equal(res.status, 201);
+    const seen = (await res.json()) as { raw: boolean; text: string; length: number };
+    assert.equal(seen.raw, true, 'the handler gets a Buffer');
+    assert.equal(seen.text, raw, 'byte-for-byte identical to what was sent');
+    assert.equal(seen.length, Buffer.byteLength(raw));
+
+    const signedOverRaw = mac(`${timestamp}.${raw}`);
+    assert.equal(mac(`${timestamp}.${seen.text}`), signedOverRaw, 'the raw body verifies');
+    const reserialised = JSON.stringify(JSON.parse(seen.text));
+    assert.notEqual(reserialised, raw);
+    assert.notEqual(mac(`${timestamp}.${reserialised}`), signedOverRaw, 'a re-serialised body would FAIL verification');
+
+    // casing, trailing slash and other content types still reach the raw reader; query strings are ignored for matching
+    for (const path of ['/v1/Webhooks/MoonPay', '/v1/webhooks/moonpay/', '/v1/webhooks/moonpay?x=1']) {
+      const r = await send(path, raw, 'text/plain');
+      assert.equal(r.status, 201, path);
+      assert.equal(((await r.json()) as { text: string }).text, raw, path);
+    }
+    // a request with no body is left as `{}` (no Buffer); the webhook controller treats that as zero bytes
+    assert.equal((await fetch(`${base}/v1/webhooks/moonpay`, { method: 'POST' })).status, 201);
+
+    // every other route is unchanged: JSON is parsed into an object by the normal parser
+    const other = (await (await send('/v1/webhooks/other', raw)).json()) as { raw: boolean; body: { type: string } };
+    assert.equal(other.raw, false);
+    assert.equal(other.body.type, 'transaction_updated');
+    const echo = await fetch(`${base}/v1/echo`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: raw });
+    assert.equal(echo.status, 201);
+    // and the 100kb limit still applies to the raw route
+    assert.equal((await send('/v1/webhooks/moonpay', JSON.stringify({ blob: 'a'.repeat(101 * 1024) }))).status, 413);
+    assert.equal((await send('/v1/webhooks/moonpay', JSON.stringify({ blob: 'a'.repeat(50_000) }))).status, 201);
+  } finally {
+    await app.close();
+  }
 });

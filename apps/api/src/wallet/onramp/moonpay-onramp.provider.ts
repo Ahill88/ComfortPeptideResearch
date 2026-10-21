@@ -27,7 +27,7 @@ export interface MoonPayQuoteInput {
   intendedUsdCents: number;
   /** Our OnRampIntent id; sent to MoonPay as externalTransactionId and used by the sandbox widget path. */
   intentId: string;
-  /** Customer's public IP; when present (and a valid IP literal) it is keyed-hashed into allowedIpAddress via createAllowedIpHash. */
+  /** Customer's public IP; when present (and a valid IP literal) it is canonicalized and keyed-hashed into allowedIpAddress via createAllowedIpHash. */
   customerIp?: string;
 }
 
@@ -43,20 +43,84 @@ export function createMoonPayUrlSignature(queryWithQuestionMark: string, signing
   return createHmac('sha256', signingSecret).update(queryWithQuestionMark).digest('base64');
 }
 
-/** Domain-separation label for the allowedIpAddress subkey. Never reuse it for anything else. */
-const ALLOWED_IP_DOMAIN = 'helix-allowed-ip-v1';
+/**
+ * Canonical text form of a customer IP, exactly as MoonPay's IP-matching page requires it before hashing (the match is an
+ * exact string comparison of the hash, not a semantic comparison of the address), or null when `raw` is not a single
+ * IP literal. Rules (https://dev.moonpay.com/widget/on-ramp/customization/ip-matching.md):
+ *   - strip a port and square brackets ("[2001:db8::1]:443" -> "2001:db8::1", "203.0.113.42:8080" -> "203.0.113.42")
+ *   - IPv4: dotted quad, no leading zeros (a leading-zero octet is ambiguous octal, so it is rejected, not guessed)
+ *   - IPv4-mapped IPv6 ("::ffff:203.0.113.42") is unmapped to plain IPv4
+ *   - IPv6: RFC 5952 (lowercase, longest run of zero groups compressed to "::", no leading zeros)
+ * Anything else (lists, junk, a zone id, an empty string, text starting with "?") returns null and is never hashed.
+ */
+export function canonicalizeCustomerIp(raw: string): string | null {
+  let value = raw.trim();
+  if (!value || /[\s,?%/]/.test(value)) return null;
+  const bracketed = /^\[([^\]]+)\](?::\d{1,5})?$/.exec(value);
+  if (bracketed) value = bracketed[1];
+  else if (/^\d{1,3}(?:\.\d{1,3}){3}:\d{1,5}$/.test(value)) value = value.slice(0, value.lastIndexOf(':'));
+  const family = isIP(value);
+  if (family === 4) return canonicalIpv4(value);
+  if (family !== 6) return null;
+  const groups = parseIpv6(value);
+  if (!groups) return null;
+  // IPv4-mapped ::ffff:a.b.c.d (groups 0-4 zero, group 5 = 0xffff) is unmapped.
+  if (groups.slice(0, 5).every((g) => g === 0) && groups[5] === 0xffff) {
+    return `${groups[6] >> 8}.${groups[6] & 0xff}.${groups[7] >> 8}.${groups[7] & 0xff}`;
+  }
+  let best = { start: -1, length: 0 };
+  for (let i = 0; i < 8; ) {
+    if (groups[i] !== 0) { i++; continue; }
+    let j = i;
+    while (j < 8 && groups[j] === 0) j++;
+    if (j - i > best.length) best = { start: i, length: j - i };
+    i = j;
+  }
+  const hex = groups.map((g) => g.toString(16));
+  if (best.length < 2) return hex.join(':');
+  return `${hex.slice(0, best.start).join(':')}::${hex.slice(best.start + best.length).join(':')}`;
+}
+
+function canonicalIpv4(value: string): string | null {
+  const octets = value.split('.');
+  if (octets.length !== 4 || octets.some((o) => !/^(0|[1-9]\d{0,2})$/.test(o) || Number(o) > 255)) return null;
+  return octets.join('.');
+}
+
+/** Parses a valid IPv6 literal (as accepted by net.isIP, no zone id) into eight 16-bit groups. */
+function parseIpv6(value: string): number[] | null {
+  let text = value.toLowerCase();
+  const tail = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (tail) {
+    const v4 = canonicalIpv4(tail[2]);
+    if (!v4) return null;
+    const [a, b, c, d] = v4.split('.').map(Number);
+    text = `${tail[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const rest = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const missing = 8 - head.length - rest.length;
+  if (halves.length === 2 ? missing < 1 : missing !== 0) return null;
+  const all = [...head, ...(halves.length === 2 ? Array(missing).fill('0') : []), ...rest];
+  const groups = all.map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  return groups.length === 8 && groups.every((g) => Number.isInteger(g)) ? groups : null;
+}
 
 /**
- * allowedIpAddress value: HMAC-SHA256(subkey, ip), base64, where subkey = HMAC-SHA256(signingSecret, 'helix-allowed-ip-v1').
+ * allowedIpAddress value, exactly as MoonPay documents it: base64(HMAC-SHA256(signingSecret, canonicalIp)), the SAME signing
+ * key that signs the widget URL (MoonPay recomputes this from the IP it observes and compares the strings; any other key
+ * or derivation makes IP matching, which is mandatory to go live, fail with "Unverified Connection").
  *
- * The URL-signing secret must never act as an oracle: with HMAC(signingSecret, ip) a caller-influenced "ip" string
- * (e.g. a spoofable forwarded header) would return a valid URL-signing MAC for attacker-chosen text. The derived
- * subkey is one-way from the secret and domain-separated, so these hashes can never be valid URL signatures, and
- * the raw IP is not recoverable from the URL without the secret.
+ * The input must be a canonical IP literal (see canonicalizeCustomerIp). That is what keeps the URL-signing key from acting
+ * as an oracle: URL signatures are always computed over a query string that begins with "?", and a canonical IP literal
+ * consists only of hex digits, "." and ":", so no value hashed here can ever equal a valid URL signature.
  */
 export function createAllowedIpHash(ip: string, signingSecret: string): string {
-  const subkey = createHmac('sha256', signingSecret).update(ALLOWED_IP_DOMAIN).digest();
-  return createHmac('sha256', subkey).update(ip).digest('base64');
+  const canonical = canonicalizeCustomerIp(ip);
+  if (canonical === null || canonical !== ip) throw new Error('allowedIpAddress must be hashed from a canonical IP literal');
+  return createHmac('sha256', signingSecret).update(canonical).digest('base64');
 }
 
 @Injectable()
@@ -121,10 +185,10 @@ export class MoonPayOnRampProvider implements OnRampProvider {
       ['externalCustomerId', input.customerId],
       ['externalTransactionId', input.intentId],
     ];
-    // Only a real IP literal is bound; anything else (empty, junk, a crafted string) is dropped, never hashed.
-    if (input.customerIp && isIP(input.customerIp) !== 0) {
-      params.push(['allowedIpAddress', createAllowedIpHash(input.customerIp, signingSecret)]);
-    }
+    // Only a real IP literal is bound, in MoonPay's canonical form; anything else (empty, junk, a list, a crafted string) is
+    // dropped, never hashed. Omitting the parameter makes MoonPay skip IP enforcement for the session (documented).
+    const canonicalIp = input.customerIp ? canonicalizeCustomerIp(input.customerIp) : null;
+    if (canonicalIp) params.push(['allowedIpAddress', createAllowedIpHash(canonicalIp, signingSecret)]);
     // Values are URL-encoded BEFORE signing; the signature covers exactly the bytes we send.
     const query = '?' + params.map(([key, value]) => `${key}=${encodeURIComponent(value)}`).join('&');
     const signature = createMoonPayUrlSignature(query, signingSecret);

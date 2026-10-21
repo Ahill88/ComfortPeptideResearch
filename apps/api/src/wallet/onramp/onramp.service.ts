@@ -1,12 +1,36 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { PrismaService } from '../../prisma.service';
-import { OnRampProvider, OnRampQuote, SolanaChain, centsToAtomic } from '../contracts';
+import { OnRampProvider, OnRampQuote, SOLANA_NETWORK_DEVNET, SolanaChain, centsToAtomic } from '../contracts';
 import { SandboxSolanaChain } from '../chain/sandbox-solana-chain';
 import { WalletRuntimeConfig, isSandboxAllowed } from '../wallet.config';
 import { ONRAMP_PROVIDER, SOLANA_CHAIN, WALLET_RUNTIME_CONFIG } from '../wallet.tokens';
 import { WalletService } from '../wallet.service';
 import { usdcMintOf } from '../chain/chain.types';
+
+/** The quote the API returns: the provider's quote plus whether "simulate deposit" can work for it right now. */
+export type OnRampQuoteView = OnRampQuote & { simulationAvailable: boolean };
+
+/**
+ * The single rule for simulated deposits (SANDBOX ONLY). Used by mockComplete to enforce it and by the quote to
+ * advertise it, so the two can never disagree: WALLET_CHAIN_MODE=sandbox, NODE_ENV allowlisted for the sandbox, and
+ * the wired chain is the in-memory sandbox chain (a real devnet chain cannot be credited by this API).
+ */
+export function canSimulateDeposits(
+  config: Pick<WalletRuntimeConfig, 'chainMode' | 'isProductionLike' | 'isProduction'>,
+  chain: SolanaChain,
+): chain is SandboxSolanaChain {
+  return config.chainMode === 'sandbox' && isSandboxAllowed(config) && chain instanceof SandboxSolanaChain;
+}
+
+export const MOCK_COMPLETE_REFUSED_MESSAGE =
+  'Simulated deposits only work on the in-memory sandbox chain. This API is on Solana devnet: send devnet USDC to your wallet address instead.';
+const MOCK_COMPLETE_REFUSED_GENERIC = 'Simulated deposits only work on the in-memory sandbox chain, which this API is not running.';
+
+/** The devnet wording is used only when the wired chain really is Solana devnet; anything else gets a message that makes no network claim. */
+export function mockCompleteRefusalMessage(chain: Pick<SolanaChain, 'network'>): string {
+  return chain.network === SOLANA_NETWORK_DEVNET ? MOCK_COMPLETE_REFUSED_MESSAGE : MOCK_COMPLETE_REFUSED_GENERIC;
+}
 
 @Injectable()
 export class OnRampService {
@@ -26,7 +50,7 @@ export class OnRampService {
   async createIntent(
     customerId: string,
     input: { intendedUsdCents: number; customerIp?: string; orderId?: string },
-  ): Promise<{ intentId: string; status: string; quote: OnRampQuote }> {
+  ): Promise<{ intentId: string; status: string; quote: OnRampQuoteView }> {
     if (!Number.isSafeInteger(input.intendedUsdCents) || input.intendedUsdCents <= 0) {
       throw new BadRequestException('amountUsdCents must be a positive integer');
     }
@@ -57,7 +81,7 @@ export class OnRampService {
     customerId: string,
     intent: { id: string; intendedUsdCents: number; destinationAddress: string; provider: string },
     customerIp?: string,
-  ): Promise<OnRampQuote | null> {
+  ): Promise<OnRampQuoteView | null> {
     const wallet = await this.requireLinkedWallet(customerId);
     if (wallet.address !== intent.destinationAddress) return null;
     const quote = await this.quoteFor(customerId, wallet, intent.id, intent.intendedUsdCents, customerIp);
@@ -73,7 +97,7 @@ export class OnRampService {
     return wallet;
   }
 
-  private async quoteFor(customerId: string, wallet: { address: string }, intentId: string, intendedUsdCents: number, customerIp?: string): Promise<OnRampQuote> {
+  private async quoteFor(customerId: string, wallet: { address: string }, intentId: string, intendedUsdCents: number, customerIp?: string): Promise<OnRampQuoteView> {
     const quote = await this.provider.createQuote({
       customerId,
       destinationAddress: wallet.address,
@@ -87,7 +111,8 @@ export class OnRampService {
     if (quote.destinationAddress !== wallet.address) {
       throw new ConflictException('On-ramp destination must be the customer wallet');
     }
-    return quote;
+    // Additive field: true only for a local sandbox quote while mockComplete would actually accept it. Real MoonPay quotes are never simulatable.
+    return { ...quote, simulationAvailable: quote.provider === 'moonpay-sandbox' && canSimulateDeposits(this.config, this.chain) };
   }
 
   /**
@@ -97,9 +122,7 @@ export class OnRampService {
    * appear in the sandbox.
    */
   async mockComplete(customerId: string, intentId: string) {
-    if (this.config.chainMode !== 'sandbox' || !isSandboxAllowed(this.config) || !(this.chain instanceof SandboxSolanaChain)) {
-      throw new ForbiddenException('Mock completion is only available in sandbox mode when NODE_ENV is development or test');
-    }
+    if (!canSimulateDeposits(this.config, this.chain)) throw new ForbiddenException(mockCompleteRefusalMessage(this.chain));
     const intent = await this.prisma.onRampIntent.findUnique({ where: { id: intentId } });
     if (!intent || intent.customerId !== customerId) throw new NotFoundException('On-ramp intent not found');
     if (intent.provider !== 'moonpay-sandbox') throw new ConflictException('Only sandbox intents can be mock-completed');

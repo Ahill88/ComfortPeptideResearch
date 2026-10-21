@@ -149,6 +149,7 @@ test('journey through the real storefront client: link, fund, send, pay, balance
   const quote = await client.createOnrampQuote(email, 5_000);
   assert.equal(quote.sandbox, true);
   assert.ok(quote.widgetUrl.length > 0, 'widgetUrl must be read from the nested quote');
+  assert.equal(quote.simulationAvailable, true, 'sandbox chain: simulation is advertised and then works (mockCompleteOnramp below)');
   assert.equal(quote.estimatedUsdcAtomic, null, 'no invented USDC estimate');
   assert.equal((await client.fetchBalance(email)).spendableAtomic, 0n, 'credits must not appear before USDC arrives');
   await client.mockCompleteOnramp(email, quote.intentId);
@@ -408,6 +409,14 @@ test('order top-up: shortfall -> on-ramp to the customer wallet -> auto-complete
   assert.ok(plain.intentId);
   const plainRaw = await (await fetch(`${base}/v1/wallet/onramp`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-customer-email': s.email }, body: JSON.stringify({ amountUsdCents: 200 }) })).json();
   assert.deepEqual(Object.keys(raw.body.quote).sort(), Object.keys(plainRaw.quote).sort(), 'quote has exactly the POST /wallet/onramp shape');
+  // Additive contract: the quote (never the top-level response) carries simulationAvailable. The e2e API runs the in-memory sandbox chain, so it is true on both routes.
+  const quoteKeys = ['destinationAddress', 'disclosures', 'estimatedFeeUsdCents', 'estimatedUsdcAtomic', 'intendedUsdCents', 'provider', 'sandbox', 'simulationAvailable', 'widgetUrl'];
+  assert.deepEqual(Object.keys(raw.body.quote).sort(), quoteKeys);
+  assert.deepEqual(Object.keys(plainRaw.quote).sort(), quoteKeys);
+  assert.equal(raw.body.quote.simulationAvailable, true);
+  assert.equal(plainRaw.quote.simulationAvailable, true);
+  assert.equal(topUp.quote.simulationAvailable, true, 'the storefront client reads the flag from the order top-up quote');
+  assert.equal(plain.simulationAvailable, true, 'the storefront client reads the flag from the on-ramp quote');
 
   const intent = await prisma.onRampIntent.findUniqueOrThrow({ where: { id: topUp.intentId } });
   assert.equal(intent.orderId, s.orderId);
@@ -935,4 +944,309 @@ test('fee sponsorship does not touch withdrawals: the customer is still the fee 
     assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore, 'withdrawals stay customer-paid');
     assert.equal((await client.fetchBalance(s.email)).spendableAtomic, 49_000_000n);
   });
+});
+
+// ---------------------------------------------------------------------------------------------
+// MoonPay BUY webhook: POST /v1/webhooks/moonpay (real Postgres, real Prisma JSON-path queries and row locks)
+//
+// The default app above is booted the way the older tests need it (no configureApp), so the webhook is exercised through a
+// SECOND real WalletModule app that uses the production transport setup (configureApp: raw body for this route) against the
+// SAME database. The webhook may only touch OnRampIntent + WalletAuditEvent; every test that completes an intent asserts the
+// money tables (balances, crypto transactions, reservations, orders, payments, ledger) are untouched and that the balance
+// derived from the chain does not move: credits and order payment come from the finalized on-chain balance, never from MoonPay.
+// ---------------------------------------------------------------------------------------------
+
+const WEBHOOK_KEY = `whk_e2e_${Math.random().toString(36).slice(2)}_0123456789`;
+let hookApp: import('@nestjs/common').INestApplication | undefined;
+let hookBase = '';
+
+after(async () => {
+  await hookApp?.close();
+});
+
+async function webhookBase(): Promise<string> {
+  if (hookApp) return hookBase;
+  const { Global, Module, ValidationPipe, Logger } = await import('@nestjs/common');
+  const { Test } = await import('@nestjs/testing');
+  const { PrismaService } = await import('../../apps/api/src/prisma.service');
+  const { WalletModule } = await import('../../apps/api/src/wallet/wallet.module');
+  const { configureApp } = await import('../../apps/api/src/config/configure-app');
+  const saved = { key: process.env.MOONPAY_WEBHOOK_KEY, tolerance: process.env.MOONPAY_WEBHOOK_TOLERANCE_SECONDS };
+  process.env.MOONPAY_WEBHOOK_KEY = WEBHOOK_KEY; // read by the WalletModule factory while the module compiles
+  delete process.env.MOONPAY_WEBHOOK_TOLERANCE_SECONDS;
+  try {
+    @Global()
+    @Module({ providers: [{ provide: PrismaService, useValue: prisma }], exports: [PrismaService] })
+    class HookPrismaModule {}
+    const moduleRef = await Test.createTestingModule({ imports: [HookPrismaModule, WalletModule] }).compile();
+    const created = moduleRef.createNestApplication<import('@nestjs/platform-express').NestExpressApplication>({ logger: false });
+    created.setGlobalPrefix('v1');
+    created.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    configureApp(created, process.env);
+    Logger.overrideLogger(false);
+    await created.listen(0, '127.0.0.1');
+    hookApp = created;
+    hookBase = (await created.getUrl()).replace('[::1]', '127.0.0.1');
+  } finally {
+    if (saved.key === undefined) delete process.env.MOONPAY_WEBHOOK_KEY;
+    else process.env.MOONPAY_WEBHOOK_KEY = saved.key;
+    if (saved.tolerance !== undefined) process.env.MOONPAY_WEBHOOK_TOLERANCE_SECONDS = saved.tolerance;
+  }
+  return hookBase;
+}
+
+/** MoonPay's documented algorithm, written out here independently of the production verifier. */
+function hookHeader(rawBody: string, key = WEBHOOK_KEY, t = Math.floor(Date.now() / 1000)) {
+  const { createHmac } = require('node:crypto') as typeof import('node:crypto');
+  return `t=${t},s=${createHmac('sha256', key).update(`${t}.${rawBody}`).digest('hex')}`;
+}
+
+interface HookIntent { email: string; intentId: string; customerId: string; address: string }
+/** A linked wallet plus an on-ramp intent created through the real API, re-labelled as a real-MoonPay intent (sandbox quotes are 'moonpay-sandbox'). */
+async function hookIntent(label: string, overrides: Record<string, unknown> = {}): Promise<HookIntent> {
+  const email = `${label}-${Math.random().toString(36).slice(2, 8)}@example.test`;
+  const key = Keypair.generate();
+  await client.registerWallet(email, key.publicKey.toBase58(), 'sandbox', walletSigner(key));
+  const quote = await client.createOnrampQuote(email, 5_000);
+  const customer = await prisma.customer.findUniqueOrThrow({ where: { email } });
+  await prisma.onRampIntent.update({ where: { id: quote.intentId }, data: { provider: 'moonpay', ...overrides } });
+  return { email, intentId: quote.intentId, customerId: customer.id, address: key.publicKey.toBase58() };
+}
+
+const minute = (n: number) => `2026-10-21T11:${String(n).padStart(2, '0')}:00.000Z`;
+function hookEvent(i: HookIntent, o: { type?: string; status?: string; at?: string; id?: string; data?: Record<string, unknown> } = {}) {
+  return {
+    type: o.type ?? 'transaction_updated',
+    data: {
+      id: o.id ?? `mp-${i.intentId}`,
+      updatedAt: o.at ?? minute(1),
+      status: o.status ?? 'pending',
+      failureReason: null,
+      walletAddress: i.address,
+      cryptoTransactionId: null,
+      currency: { code: 'usdc_sol' },
+      externalTransactionId: i.intentId,
+      externalCustomerId: i.customerId,
+      ...o.data,
+    },
+    externalCustomerId: i.customerId,
+  };
+}
+async function deliver(event: unknown, over: { header?: string | null; key?: string; spaced?: boolean } = {}) {
+  const body = over.spaced ? JSON.stringify(event, null, 2) : JSON.stringify(event);
+  const header = over.header === undefined ? hookHeader(body, over.key) : over.header;
+  const res = await fetch(`${await webhookBase()}/v1/webhooks/moonpay`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(header ? { 'moonpay-signature-v2': header } : {}) },
+    body,
+  });
+  return res.status;
+}
+const intentRow = (id: string) => prisma.onRampIntent.findUniqueOrThrow({ where: { id } });
+const hookAudits = (customerId: string, action?: string) => prisma.walletAuditEvent.findMany({ where: { customerId, ...(action ? { action } : {}) }, orderBy: { createdAt: 'asc' } });
+
+/** Everything that holds or moves value. The webhook must leave every one of these exactly as it found them. */
+async function moneyState() {
+  return JSON.stringify({
+    cryptoTransactions: await prisma.cryptoTransaction.findMany({ orderBy: { id: 'asc' } }),
+    balanceSnapshots: await prisma.balanceSnapshot.findMany({ orderBy: { id: 'asc' } }),
+    reservations: await prisma.creditReservation.findMany({ orderBy: { id: 'asc' } }),
+    orders: await prisma.order.findMany({ orderBy: { id: 'asc' } }),
+    payments: await prisma.payment.findMany({ orderBy: { id: 'asc' } }),
+    ledger: await prisma.ledgerEntry.findMany({ orderBy: { id: 'asc' } }),
+  }, (_k, v) => (typeof v === 'bigint' ? v.toString() : v));
+}
+
+test('moonpay webhook (real DB): created -> pending -> completed advances the intent, saves externalReference, audits each step, and never touches money tables', async () => {
+  const i = await hookIntent('hook-flow');
+  const before = await moneyState();
+  const txId = `mp-${i.intentId}`;
+
+  assert.equal(await deliver(hookEvent(i, { type: 'transaction_created', status: 'waitingPayment', at: minute(1) })), 200);
+  let row = await intentRow(i.intentId);
+  assert.equal(row.status, 'PENDING');
+  assert.equal(row.externalReference, txId);
+  assert.equal(await deliver(hookEvent(i, { status: 'pending', at: minute(2) }, ), { spaced: true }), 200, 'pretty-printed raw bytes verify too');
+  assert.equal(await deliver(hookEvent(i, { status: 'completed', at: minute(3), data: { cryptoTransactionId: '5Zfake' } })), 200);
+  row = await intentRow(i.intentId);
+  assert.equal(row.status, 'COMPLETED');
+
+  // duplicate deliveries and a late older event: 200, no change, no new audit rows
+  const auditsBefore = (await hookAudits(i.customerId)).filter((a) => a.action.startsWith('MOONPAY_WEBHOOK_')).length;
+  assert.equal(await deliver(hookEvent(i, { status: 'completed', at: minute(3), data: { cryptoTransactionId: '5Zfake' } })), 200);
+  assert.equal(await deliver(hookEvent(i, { status: 'pending', at: minute(2) })), 200);
+  row = await intentRow(i.intentId);
+  assert.equal(row.status, 'COMPLETED');
+  const audits = (await hookAudits(i.customerId)).filter((a) => a.action.startsWith('MOONPAY_WEBHOOK_')); // (the wallet-link audit row is not ours)
+  const processed = audits.filter((a) => a.action === 'MOONPAY_WEBHOOK_PROCESSED');
+  assert.equal(processed.length, 3);
+  assert.deepEqual(processed.map((a) => (a.detail as any).moonpayUpdatedAt), [minute(1), minute(2), minute(3)].map((m) => m));
+  assert.equal(audits.length, auditsBefore + 1, 'only the older event added a (stale) audit row; the exact duplicate added none');
+  assert.equal(audits.filter((a) => a.action === 'MOONPAY_WEBHOOK_STALE').length, 1);
+  for (const a of audits) {
+    const text = JSON.stringify(a.detail);
+    assert.ok(!text.includes(i.email) && !text.includes(i.address) && !/signature|whk_e2e/i.test(text), `no PII, wallet address, signature or key in audit detail: ${text}`);
+  }
+
+  assert.equal(await moneyState(), before, 'balances, crypto transactions, reservations, orders, payments and ledger are untouched');
+});
+
+test('moonpay webhook (real DB): a completed event for a NEVER-FUNDED wallet changes no balance and pays no order', async () => {
+  const i = await hookIntent('hook-nofund');
+  await setEligibility(i.email, 'APPROVED'); // so the 402 below is about the balance, not the eligibility gate
+  const orderId = await addOrder(i.email, 'hook-nofund', 2_500);
+  const balanceBefore = await client.fetchBalance(i.email);
+  assert.equal(balanceBefore.spendableAtomic, 0n);
+  const before = await moneyState();
+  const counts = async () => [await prisma.cryptoTransaction.count(), await prisma.creditReservation.count(), await prisma.balanceSnapshot.count(), await prisma.order.count()];
+  const countsBefore = await counts();
+
+  assert.equal(await deliver(hookEvent(i, { type: 'transaction_updated', status: 'completed', at: minute(9), data: { cryptoTransactionId: '4xNotRealOnChain' } })), 200);
+  assert.equal((await intentRow(i.intentId)).status, 'COMPLETED', 'the intent bookkeeping follows MoonPay...');
+
+  const balanceAfter = await client.fetchBalance(i.email);
+  assert.equal(balanceAfter.spendableAtomic, 0n, '...but the balance is derived from the chain, which received nothing');
+  assert.equal(balanceAfter.stale, balanceBefore.stale);
+  assert.deepEqual(await counts(), countsBefore, 'no CryptoTransaction, reservation, snapshot or order row was created');
+  assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status, 'PENDING_PAYMENT', 'the order is NOT marked paid');
+  assert.equal(await moneyState(), before);
+  await assert.rejects(client.prepareCheckout(i.email, orderId), (e: any) => e.status === 402, 'checkout still refuses: there is no balance to spend');
+});
+
+test('moonpay webhook (real DB): invalid signature variants are 401 and leave every table untouched; the same body signed correctly is accepted', async () => {
+  const i = await hookIntent('hook-auth');
+  const event = hookEvent(i, { status: 'completed', at: minute(4) });
+  const body = JSON.stringify(event);
+  const good = hookHeader(body);
+  const before = JSON.stringify([await intentRow(i.intentId), await prisma.walletAuditEvent.count()]);
+  const old = Math.floor(Date.now() / 1000) - 3_600;
+  const cases: [string, Parameters<typeof deliver>[1]][] = [
+    ['missing header', { header: null }],
+    ['malformed header', { header: 'nonsense' }],
+    ['short mac', { header: good.slice(0, good.length - 4) }],
+    ['wrong key', { key: 'not-the-key' }],
+    ['stale timestamp', { header: hookHeader(body, WEBHOOK_KEY, old) }],
+    ['body signed, then tampered', { header: hookHeader(JSON.stringify(hookEvent(i, { status: 'waitingPayment', at: minute(4) }))) }],
+  ];
+  for (const [label, over] of cases) assert.equal(await deliver(event, over), 401, label);
+  assert.equal(JSON.stringify([await intentRow(i.intentId), await prisma.walletAuditEvent.count()]), before);
+  assert.equal(await deliver(event), 200);
+  assert.equal((await intentRow(i.intentId)).status, 'COMPLETED');
+});
+
+test('moonpay webhook (real DB): unknown intent => 200 + MOONPAY_WEBHOOK_UNKNOWN_INTENT audit (deduplicated); other event types => 200 no-op; invalid payload => 400', async () => {
+  const i = await hookIntent('hook-unknown');
+  const unknown = hookEvent(i, { data: { externalTransactionId: 'no-such-intent' }, id: 'mp-unknown-1' });
+  assert.equal(await deliver(unknown), 200);
+  assert.equal(await deliver(unknown), 200);
+  const audits = await hookAudits(i.customerId, 'MOONPAY_WEBHOOK_UNKNOWN_INTENT');
+  assert.equal(audits.length, 1);
+  // a customer id that does not exist at all is still auditable (WalletAuditEvent.customerId has no foreign key)
+  assert.equal(await deliver({ ...unknown, data: { ...unknown.data, id: 'mp-unknown-2', externalCustomerId: undefined }, externalCustomerId: undefined }), 200);
+  assert.equal((await prisma.walletAuditEvent.findMany({ where: { customerId: 'unknown', action: 'MOONPAY_WEBHOOK_UNKNOWN_INTENT' } })).length >= 1, true);
+
+  const before = JSON.stringify(await intentRow(i.intentId));
+  for (const type of ['sell_transaction_updated', 'identity_check_updated', 'swap_transaction_created']) assert.equal(await deliver({ ...hookEvent(i, { status: 'completed' }), type }), 200, type);
+  assert.equal(JSON.stringify(await intentRow(i.intentId)), before);
+  assert.equal(await deliver({ type: 'transaction_updated', data: { id: 'x' } }), 400);
+  assert.equal(await deliver('not an envelope'), 400);
+  const rawBody = '{not json';
+  const res = await fetch(`${await webhookBase()}/v1/webhooks/moonpay`, { method: 'POST', headers: { 'content-type': 'application/json', 'moonpay-signature-v2': hookHeader(rawBody) }, body: rawBody });
+  assert.equal(res.status, 400, 'authentic but not JSON');
+});
+
+test('moonpay webhook (real DB): wallet / currency / customer / provider mismatches change nothing and are flagged manualReview', async () => {
+  const i = await hookIntent('hook-mismatch');
+  const before = JSON.stringify(await intentRow(i.intentId));
+  const stranger = Keypair.generate().publicKey.toBase58();
+  const cases: [string, Record<string, unknown>][] = [
+    ['wallet-mismatch', { walletAddress: stranger }],
+    ['currency-mismatch', { currency: { code: 'usdc' } }],
+    ['customer-mismatch', { externalCustomerId: 'another-customer' }],
+  ];
+  for (const [reason, data] of cases) {
+    assert.equal(await deliver(hookEvent(i, { status: 'completed', at: minute(5), data })), 200, reason);
+    assert.equal(JSON.stringify(await intentRow(i.intentId)), before, reason);
+  }
+  const audits = await hookAudits(i.customerId, 'MOONPAY_WEBHOOK_MISMATCH');
+  assert.deepEqual(audits.map((a) => (a.detail as any).reason).sort(), ['currency-mismatch', 'customer-mismatch', 'wallet-mismatch']);
+  assert.ok(audits.every((a) => (a.detail as any).manualReview === true));
+  assert.equal((await hookAudits(i.customerId, 'MOONPAY_WEBHOOK_PROCESSED')).length, 0);
+
+  // a sandbox-simulation intent can never be completed by a (real) MoonPay event
+  const sandboxIntent = await hookIntent('hook-sandbox-provider', { provider: 'moonpay-sandbox' });
+  assert.equal(await deliver(hookEvent(sandboxIntent, { status: 'completed' })), 200);
+  assert.equal((await intentRow(sandboxIntent.intentId)).status, 'CREATED');
+  assert.equal(((await hookAudits(sandboxIntent.customerId, 'MOONPAY_WEBHOOK_MISMATCH'))[0].detail as any).reason, 'provider-not-moonpay');
+});
+
+test('moonpay webhook (real DB): an EXPIRED intent + completed event => COMPLETED with an audit note; expired + pending stays EXPIRED', async () => {
+  const done = await hookIntent('hook-expired-done', { status: 'EXPIRED' });
+  assert.equal(await deliver(hookEvent(done, { status: 'completed', at: minute(6) })), 200);
+  assert.equal((await intentRow(done.intentId)).status, 'COMPLETED');
+  assert.equal(((await hookAudits(done.customerId, 'MOONPAY_WEBHOOK_PROCESSED'))[0].detail as any).note, 'completed-after-expiry');
+
+  const kept = await hookIntent('hook-expired-pending', { status: 'EXPIRED' });
+  assert.equal(await deliver(hookEvent(kept, { status: 'pending', at: minute(6) })), 200);
+  const row = await intentRow(kept.intentId);
+  assert.equal(row.status, 'EXPIRED');
+  assert.equal(row.externalReference, `mp-${kept.intentId}`);
+});
+
+test('moonpay webhook (real DB): externalReference is unique in Postgres; a MoonPay transaction id claimed by another intent is a mismatch (sequential and racing)', async () => {
+  const a = await hookIntent('hook-ref-a');
+  const b = await hookIntent('hook-ref-b');
+  const shared = `mp-shared-${a.intentId}`;
+  assert.equal(await deliver(hookEvent(a, { id: shared, status: 'pending', at: minute(1) })), 200);
+  assert.equal((await intentRow(a.intentId)).externalReference, shared);
+  assert.equal(await deliver(hookEvent(b, { id: shared, status: 'completed', at: minute(2) })), 200);
+  const bRow = await intentRow(b.intentId);
+  assert.equal(bRow.externalReference, null);
+  assert.equal(bRow.status, 'CREATED');
+  assert.equal(((await hookAudits(b.customerId, 'MOONPAY_WEBHOOK_MISMATCH'))[0].detail as any).reason, 'transaction-id-claimed-by-other-intent');
+  // a different transaction id for an intent that already has one: kept, manual review
+  assert.equal(await deliver(hookEvent(a, { id: 'mp-other-tx', status: 'completed', at: minute(3) })), 200);
+  assert.equal((await intentRow(a.intentId)).status, 'PENDING');
+  assert.equal(((await hookAudits(a.customerId, 'MOONPAY_WEBHOOK_MISMATCH'))[0].detail as any).reason, 'transaction-id-differs');
+
+  // racing: two fresh intents receive the same MoonPay transaction id at the same instant; exactly one wins, both answer 200
+  const c = await hookIntent('hook-ref-c');
+  const d = await hookIntent('hook-ref-d');
+  const racing = `mp-race-${c.intentId}`;
+  const statuses = await Promise.all([deliver(hookEvent(c, { id: racing, status: 'pending' })), deliver(hookEvent(d, { id: racing, status: 'pending' }))]);
+  assert.deepEqual(statuses, [200, 200]);
+  const holders = (await prisma.onRampIntent.findMany({ where: { externalReference: racing } })).map((r) => r.id);
+  assert.equal(holders.length, 1, 'the unique index admitted exactly one holder');
+  const loser = holders[0] === c.intentId ? d : c;
+  assert.equal((await intentRow(loser.intentId)).status, 'CREATED');
+  assert.equal((await hookAudits(loser.customerId, 'MOONPAY_WEBHOOK_MISMATCH')).length, 1);
+});
+
+test('moonpay webhook (real DB): concurrent, duplicated and shuffled deliveries converge on the newest updatedAt with one audit row per distinct revision', async () => {
+  for (let round = 0; round < 6; round++) {
+    const i = await hookIntent(`hook-race-${round}`);
+    const revisions = [
+      hookEvent(i, { type: 'transaction_created', status: 'waitingPayment', at: minute(1) }),
+      hookEvent(i, { status: 'pending', at: minute(2) }),
+      hookEvent(i, { status: 'waitingAuthorization', at: minute(3) }),
+      hookEvent(i, { status: 'completed', at: minute(4) }),
+    ];
+    const deliveries = revisions.flatMap((r) => [r, r, r]).sort(() => Math.random() - 0.5);
+    const statuses = await Promise.all(deliveries.map((e) => deliver(e)));
+    assert.ok(statuses.every((s) => s === 200), `round ${round}: ${statuses.join(',')}`);
+    const row = await intentRow(i.intentId);
+    assert.equal(row.status, 'COMPLETED', `round ${round}`);
+    assert.equal(row.externalReference, `mp-${i.intentId}`);
+    const stamps = (await hookAudits(i.customerId, 'MOONPAY_WEBHOOK_PROCESSED')).map((a) => (a.detail as any).moonpayUpdatedAt as string);
+    assert.equal(new Set(stamps).size, stamps.length, `round ${round}: no revision was processed twice`);
+    assert.ok(stamps.includes(minute(4)) && stamps.length >= 1 && stamps.length <= 4);
+    assert.equal(stamps.slice().sort().at(-1), minute(4));
+    // Applied order is increasing updatedAt (older ones are skipped as stale), so the before/after statuses must chain exactly.
+    const chain = (await hookAudits(i.customerId, 'MOONPAY_WEBHOOK_PROCESSED')).map((a) => a.detail as any).sort((x, y) => x.moonpayUpdatedAt.localeCompare(y.moonpayUpdatedAt));
+    chain.forEach((d, n) => assert.equal(d.statusBefore, n === 0 ? 'CREATED' : chain[n - 1].statusAfter, `round ${round}: status chain breaks at revision ${d.moonpayUpdatedAt}`));
+    assert.equal(chain.at(-1).statusAfter, 'COMPLETED');
+    // Row createdAt is deliberately NOT asserted to be monotonic: a delivery whose transaction started earlier can wait for the
+    // row lock and commit later with an earlier createdAt. That is exactly why the service takes the maximum moonpayUpdatedAt
+    // over an intent's PROCESSED rows instead of trusting the newest row.
+  }
 });

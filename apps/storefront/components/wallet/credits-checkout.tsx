@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useAuth } from '../auth-provider';
 import { WalletProvider, useWallet } from './wallet-provider';
+import { ManualDevnetFunding } from './manual-devnet-funding';
 import { buttonClass, eyebrowClass, Notice, primaryButtonClass, SANDBOX_NOTE, Spinner } from './ui';
 import {
   apiRequest, createOrderTopUp, errorMessage, fetchCheckoutStatus, mockCompleteOnramp, prepareCheckout, submitCheckout, WalletApiError,
@@ -13,8 +14,8 @@ import {
 import { ATOMIC_PER_CENT, centsToAtomic, formatCents, formatSol, formatUsdc, formatWholeNumber, researchCredits } from '../../lib/wallet/credits';
 import { checkoutPreparationProblems, signingOptionsFor } from '../../lib/wallet/tx';
 import {
-  createTopUpRun, createTopUpStore, DEFAULT_TOPUP_OPTIONS, findResumableTopUp, safeWidgetUrl,
-  type TopUpDeps, type TopUpPlan, type TopUpRun, type TopUpState, type TopUpStore, type WidgetOpenResult,
+  createTopUpRun, createTopUpStore, DEFAULT_TOPUP_OPTIONS, findResumableTopUp, fundingOf, quoteFundingMode, safeWidgetUrl,
+  type FundingMode, type TopUpDeps, type TopUpPlan, type TopUpRun, type TopUpState, type TopUpStore, type WidgetOpenResult,
 } from '../../lib/wallet/topup-flow';
 
 export type CreditsCheckoutRequest = { id: number; email: string; shippingAddress: string };
@@ -25,7 +26,7 @@ type Stage =
   | { kind: 'working'; label: string }
   | { kind: 'order-unavailable'; detail: string }
   | { kind: 'topup-offer'; offer: TopUpOffer }
-  | { kind: 'topup-run'; sandbox: boolean }
+  | { kind: 'topup-run'; funding: FundingMode }
   | { kind: 'topup-cancelled' }
   | { kind: 'authorize'; prep: CheckoutPreparation }
   | { kind: 'signing' }
@@ -172,7 +173,7 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
     });
     runRef.current?.suspend();
     runRef.current = run;
-    setStage({ kind: 'topup-run', sandbox: plan.sandbox });
+    setStage({ kind: 'topup-run', funding: fundingOf(plan) });
     if (mode === 'start') run.start(); else run.resume();
   };
 
@@ -200,7 +201,7 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
     orderRef.current = { id: offer.orderId, totalCents: Number(offer.requiredAtomic / ATOMIC_PER_CENT) };
     startRun({
       orderId: offer.orderId, intentId: offer.intentId, requiredAtomic: offer.requiredAtomic, baselineSpendableAtomic: offer.spendableAtomic,
-      consentedAt: Date.now(), widgetUrl: offer.quote.widgetUrl, sandbox: offer.quote.sandbox, merchant: offer.merchant,
+      consentedAt: Date.now(), widgetUrl: offer.quote.widgetUrl, sandbox: offer.quote.sandbox, funding: quoteFundingMode(offer.quote), merchant: offer.merchant,
     }, 'start');
   };
 
@@ -354,8 +355,8 @@ function Panel({ request, items, subtotalCents, onClose }: { request: CreditsChe
           : stage.kind === 'working' ? <Spinner label={stage.label} />
           : stage.kind === 'signing' ? <Spinner label="Signing in this browser and submitting..." />
           : stage.kind === 'order-unavailable' ? <div className="space-y-4"><Notice tone="warn" title="Order service unavailable in preview">{stage.detail}</Notice><div className="flex flex-wrap gap-3"><button type="button" className={buttonClass} onClick={startOver}>Back</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
-          : stage.kind === 'topup-offer' ? <TopUpOfferPanel offer={stage.offer} onConfirm={() => confirmTopUp(stage.offer)} onCancel={cancelTopUp} />
-          : stage.kind === 'topup-run' ? <TopUpRunPanel state={runState} sandbox={stage.sandbox} widgetUrl={runWidgetUrl.current ? safeWidgetUrl(runWidgetUrl.current) : null} simulation={simulation} onSimulate={simulateDeposit} onCancel={cancelTopUp} onKeepWaiting={() => runRef.current?.keepWaiting()} onTopUpMore={() => orderId && orderTotalCents !== null ? void requestTopUp(orderId, orderTotalCents) : undefined} />
+          : stage.kind === 'topup-offer' ? <TopUpOfferPanel offer={stage.offer} address={wallet.address} onConfirm={() => confirmTopUp(stage.offer)} onCancel={cancelTopUp} />
+          : stage.kind === 'topup-run' ? <TopUpRunPanel state={runState} funding={stage.funding} address={wallet.address} widgetUrl={runWidgetUrl.current ? safeWidgetUrl(runWidgetUrl.current) : null} simulation={simulation} onSimulate={simulateDeposit} onCancel={cancelTopUp} onKeepWaiting={() => runRef.current?.keepWaiting()} onTopUpMore={() => orderId && orderTotalCents !== null ? void requestTopUp(orderId, orderTotalCents) : undefined} />
           : stage.kind === 'topup-cancelled' ? <div className="space-y-4"><Notice tone="info" title="Top-up cancelled">Nothing was signed or sent from your wallet. {orderId ? `Order ${orderId} remains awaiting payment.` : ''} If you already completed a MoonPay purchase, that USDC still arrives in your own wallet and stays yours.</Notice><div className="flex flex-wrap gap-3">{orderId && orderTotalCents !== null ? <button type="button" className={primaryButtonClass} onClick={() => void prepare(orderId, orderTotalCents)}>Check this order again</button> : null}<button type="button" className={buttonClass} onClick={startOver}>Start over</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
           : stage.kind === 'authorize' ? <AuthorizePanel prep={stage.prep} orderId={orderId} orderTotalCents={orderTotalCents} subtotalCents={subtotalCents} onAuthorize={() => authorize(stage.prep)} onReject={() => { openSessionStore()?.clear(); setStage({ kind: 'rejected' }); }} />
           : stage.kind === 'rejected' ? <div className="space-y-4"><Notice tone="info" title="Authorization rejected">Nothing was signed or sent from your wallet, so you were not charged. {orderId ? `Order ${orderId} remains unpaid.` : ''}</Notice><div className="flex flex-wrap gap-3"><button type="button" className={primaryButtonClass} onClick={() => orderId && orderTotalCents !== null ? void prepare(orderId, orderTotalCents) : startOver()}>Review authorization again</button><button type="button" className={buttonClass} onClick={onClose}>Close</button></div></div>
@@ -388,32 +389,62 @@ function AuthorizePanel({ prep, orderId, orderTotalCents, subtotalCents, onAutho
   </div>;
 }
 
-function TopUpOfferPanel({ offer, onConfirm, onCancel }: { offer: TopUpOffer; onConfirm: () => void; onCancel: () => void }) {
+function TopUpOfferPanel({ offer, address, onConfirm, onCancel }: { offer: TopUpOffer; address: string | null; onConfirm: () => void; onCancel: () => void }) {
   const [agreed, setAgreed] = useState(false);
   const { quote } = offer;
   const usd = formatCents(offer.topUpUsdCents);
-  const widgetOk = quote.sandbox || safeWidgetUrl(quote.widgetUrl) !== null;
+  const mode = quoteFundingMode(quote);
+  const manual = mode === 'manual-devnet';
+  const widgetOk = mode !== 'widget' || safeWidgetUrl(quote.widgetUrl) !== null;
+  const payLine = <li>Only when the wallet service reports at least {formatUsdc(offer.requiredAtomic)} USDC spendable, this page asks your own wallet in this browser to sign one transfer of exactly <b className="font-mono">{formatUsdc(offer.requiredAtomic)} USDC</b> to {offer.merchant ? <>the merchant address <span className="break-all font-mono text-xs">{offer.merchant}</span></> : 'Helix & Field\u2019s merchant payment address, which the service issues only when the payment is prepared (the page refuses to sign unless the prepared transaction pays exactly that amount, from your wallet, to one merchant recipient)'} and submits it. No further click is needed.</li>;
+  const totals = <>
+    <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Order total</dt><dd className="font-mono">{formatUsdc(offer.requiredAtomic)} USDC</dd></div>
+    <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Spendable credits now</dt><dd className="font-mono">{formatUsdc(offer.spendableAtomic)} USDC</dd></div>
+    <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Still needed</dt><dd className="font-mono">{formatUsdc(offer.shortfallAtomic)} USDC</dd></div>
+  </>;
+  if (manual) return <div className="space-y-5">
+    <div>
+      <p className="text-base font-semibold leading-7">Add devnet USDC to your wallet, then pay this order</p>
+      <p className="mt-1 text-sm leading-6 text-slate-600">No purchase is made on this page. Your order needs {formatUsdc(offer.shortfallAtomic)} more USDC than your wallet holds.</p>
+    </div>
+    <dl className="divide-y divide-silver border-y border-silver text-sm">{totals}</dl>
+    <ManualDevnetFunding address={address} context="checkout" />
+    <div className="rounded-xl bg-midnight p-4 text-sm leading-6 text-porcelain">
+      <p className="font-semibold">What you are agreeing to</p>
+      <ol className="mt-2 list-decimal space-y-1 pl-5">
+        <li>You add devnet USDC to your wallet address yourself. This page stays open and checks your balance about every 3 seconds.</li>
+        {payLine}
+        <li>You can cancel at any time before signing. Nothing is signed if funds do not arrive.</li>
+      </ol>
+    </div>
+    <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-xl border border-silver bg-white p-3 text-sm leading-6 focus-within:outline focus-within:outline-2 focus-within:outline-offset-2 focus-within:outline-midnight">
+      <input type="checkbox" className="mt-1 h-5 w-5 shrink-0" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+      <span>When enough devnet USDC reaches my wallet, pay this order automatically ({formatUsdc(offer.requiredAtomic)} USDC); I can cancel before signing.</span>
+    </label>
+    <div className="flex flex-wrap gap-3">
+      <button type="button" className={primaryButtonClass} disabled={!agreed} onClick={onConfirm}>Wait for devnet USDC, then pay</button>
+      <button type="button" className={buttonClass} onClick={onCancel}>Cancel - nothing signed</button>
+    </div>
+  </div>;
   return <div className="space-y-5">
     <div>
       <p className="text-base font-semibold leading-7">Buy ${usd} of USDC with a card or bank via MoonPay</p>
       <p className="mt-1 text-sm leading-6 text-slate-600">MoonPay, not Helix &amp; Field, handles ID checks, fees and payment. The USDC is delivered to your own wallet, not to Helix &amp; Field.</p>
     </div>
     <dl className="divide-y divide-silver border-y border-silver text-sm">
-      <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Order total</dt><dd className="font-mono">{formatUsdc(offer.requiredAtomic)} USDC</dd></div>
-      <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Spendable credits now</dt><dd className="font-mono">{formatUsdc(offer.spendableAtomic)} USDC</dd></div>
-      <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Still needed</dt><dd className="font-mono">{formatUsdc(offer.shortfallAtomic)} USDC</dd></div>
-      <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Top-up amount</dt><dd>${usd} USD{quote.sandbox ? ' (sandbox)' : ' via MoonPay'}</dd></div>
+      {totals}
+      <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Top-up amount</dt><dd>${usd} USD{mode === 'simulate' ? ' (sandbox)' : quote.sandbox ? ' via MoonPay (sandbox)' : ' via MoonPay'}</dd></div>
       {quote.estimatedFeeUsdCents !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Estimated provider fee</dt><dd>${formatCents(quote.estimatedFeeUsdCents)}</dd></div> : null}
       {quote.estimatedUsdcAtomic !== null ? <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Provider&apos;s USDC estimate</dt><dd className="font-mono">{formatUsdc(quote.estimatedUsdcAtomic)}</dd></div> : null}
     </dl>
     <p className="text-xs leading-6 text-slate-600">{quote.estimatedUsdcAtomic !== null ? 'The estimate comes from the provider.' : 'The provider has not quoted a USDC amount.'} Fees set by MoonPay can reduce the USDC that actually arrives. If what arrives is still short of the order total, we show the new shortfall and you choose what to do; we never top up again on our own.</p>
     {quote.disclosures.length ? <ul className="space-y-2 text-xs leading-6 text-slate-700">{quote.disclosures.map((d) => <li key={d} className="rounded-lg bg-porcelain p-3">{d}</li>)}</ul> : null}
-    {quote.sandbox ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs leading-6 text-amber-900"><p className="font-semibold">SANDBOX SIMULATION</p><p className="mt-1">This is not MoonPay. No identity check, card payment or real funds are involved; the next step offers a button that asks the sandbox API to simulate a devnet USDC deposit.</p></div> : null}
+    {mode === 'simulate' ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-xs leading-6 text-amber-900"><p className="font-semibold">SANDBOX SIMULATION</p><p className="mt-1">This is not MoonPay. No identity check, card payment or real funds are involved; the next step offers a button that asks the sandbox API to simulate a devnet USDC deposit.</p></div> : null}
     <div className="rounded-xl bg-midnight p-4 text-sm leading-6 text-porcelain">
       <p className="font-semibold">What you are agreeing to</p>
       <ol className="mt-2 list-decimal space-y-1 pl-5">
-        <li>{quote.sandbox ? 'You simulate the top-up on this page.' : 'MoonPay opens in a new tab or window and you complete the purchase there. This page stays open and checks your balance about every 3 seconds.'}</li>
-        <li>Only when the wallet service reports at least {formatUsdc(offer.requiredAtomic)} USDC spendable, this page asks your own wallet in this browser to sign one transfer of exactly <b className="font-mono">{formatUsdc(offer.requiredAtomic)} USDC</b> to {offer.merchant ? <>the merchant address <span className="break-all font-mono text-xs">{offer.merchant}</span></> : 'Helix & Field\u2019s merchant payment address, which the service issues only when the payment is prepared (the page refuses to sign unless the prepared transaction pays exactly that amount, from your wallet, to one merchant recipient)'} and submits it. No further click is needed.</li>
+        <li>{mode === 'simulate' ? 'You simulate the top-up on this page.' : 'MoonPay opens in a new tab or window and you complete the purchase there. This page stays open and checks your balance about every 3 seconds.'}</li>
+        {payLine}
         <li>You can cancel at any time before signing. Nothing is signed if funds do not arrive.</li>
       </ol>
     </div>
@@ -423,7 +454,7 @@ function TopUpOfferPanel({ offer, onConfirm, onCancel }: { offer: TopUpOffer; on
     </label>
     {!widgetOk ? <Notice tone="error">The provider did not return a secure (https) payment link, so the top-up cannot be opened. Nothing was bought or signed.</Notice> : null}
     <div className="flex flex-wrap gap-3">
-      <button type="button" className={primaryButtonClass} disabled={!agreed || !widgetOk} onClick={onConfirm}>{quote.sandbox ? `Top up $${usd} (sandbox), then pay` : `Open MoonPay: top up $${usd}, then pay`}</button>
+      <button type="button" className={primaryButtonClass} disabled={!agreed || !widgetOk} onClick={onConfirm}>{mode === 'simulate' ? `Top up $${usd} (sandbox), then pay` : `Open MoonPay: top up $${usd}, then pay`}</button>
       <button type="button" className={buttonClass} onClick={onCancel}>Cancel - nothing bought or signed</button>
     </div>
   </div>;
@@ -431,25 +462,26 @@ function TopUpOfferPanel({ offer, onConfirm, onCancel }: { offer: TopUpOffer; on
 
 type Simulation = { busy: boolean; requested: boolean; error: string | null };
 
-function TopUpRunPanel({ state, sandbox, widgetUrl, simulation, onSimulate, onCancel, onKeepWaiting, onTopUpMore }: {
-  state: TopUpState; sandbox: boolean; widgetUrl: string | null; simulation: Simulation; onSimulate: () => void; onCancel: () => void; onKeepWaiting: () => void; onTopUpMore: () => void;
+function TopUpRunPanel({ state, funding, address, widgetUrl, simulation, onSimulate, onCancel, onKeepWaiting, onTopUpMore }: {
+  state: TopUpState; funding: FundingMode; address: string | null; widgetUrl: string | null; simulation: Simulation; onSimulate: () => void; onCancel: () => void; onKeepWaiting: () => void; onTopUpMore: () => void;
 }) {
+  const manual = funding === 'manual-devnet';
   const linkClass = 'font-semibold underline underline-offset-4';
   const link = widgetUrl ? <a className={linkClass} href={widgetUrl} target="_blank" rel="noopener noreferrer">Open MoonPay in a new tab</a> : null;
   if (state.kind === 'paying') return <Spinner label="Your finalized balance now covers the order. Verifying and signing your payment in this browser, then submitting..." />;
   if (state.kind === 'short') return <div className="space-y-4">
     <Notice tone="warn" title="Funds arrived, but the order is still short">
-      Your finalized spendable balance is now <b className="font-mono">{formatUsdc(state.spendableAtomic)} USDC</b>; this order needs <b className="font-mono">{formatUsdc(state.requiredAtomic)} USDC</b>, so <b className="font-mono">{formatUsdc(state.shortfallAtomic)} USDC</b> is still missing (provider fees can reduce what arrives). Nothing was signed, and the order remains awaiting payment.
+      Your finalized spendable balance is now <b className="font-mono">{formatUsdc(state.spendableAtomic)} USDC</b>; this order needs <b className="font-mono">{formatUsdc(state.requiredAtomic)} USDC</b>, so <b className="font-mono">{formatUsdc(state.shortfallAtomic)} USDC</b> is still missing{manual ? '.' : ' (provider fees can reduce what arrives).'} Nothing was signed, and the order remains awaiting payment.
     </Notice>
     <div className="flex flex-wrap gap-3">
-      <button type="button" className={primaryButtonClass} onClick={onTopUpMore}>See another top-up quote</button>
+      {manual ? null : <button type="button" className={primaryButtonClass} onClick={onTopUpMore}>See another top-up quote</button>}
       <button type="button" className={buttonClass} onClick={onKeepWaiting}>Keep waiting for more funds</button>
       <button type="button" className={buttonClass} onClick={onCancel}>Cancel - nothing signed</button>
     </div>
   </div>;
   if (state.kind === 'timed-out') return <div className="space-y-4">
     <Notice tone="warn" title="Still waiting for funds">
-      We stopped checking after about {Math.round(DEFAULT_TIMEOUT_MINUTES)} minutes without seeing enough USDC. Nothing was signed and your order remains awaiting payment. If your MoonPay purchase is still processing, you can keep waiting; this top-up also resumes if you reload this tab.
+      We stopped checking after about {Math.round(DEFAULT_TIMEOUT_MINUTES)} minutes without seeing enough USDC. Nothing was signed and your order remains awaiting payment. {manual ? 'If you already sent devnet USDC and it has not shown up yet, you can keep waiting' : 'If your MoonPay purchase is still processing, you can keep waiting'}; this top-up also resumes if you reload this tab.
     </Notice>
     <div className="flex flex-wrap gap-3">
       <button type="button" className={primaryButtonClass} onClick={onKeepWaiting}>Keep waiting</button>
@@ -464,7 +496,8 @@ function TopUpRunPanel({ state, sandbox, widgetUrl, simulation, onSimulate, onCa
     {p.widget === 'closed' ? <Notice tone="info" title="The MoonPay window was closed">If you finished the purchase, funds may still be on their way and we keep checking. {link}</Notice> : null}
     {p.widget === 'blocked' ? <Notice tone="warn" title="Your browser blocked the MoonPay window">Nothing was bought. Open it yourself and keep this page open: {link ?? 'the link is unavailable'}.</Notice> : null}
     {p.widget === 'resumed' ? <Notice tone="info">This page was reloaded. If you already completed the purchase we keep checking for it. The MoonPay window cannot be reopened from here; to buy more, cancel and start a new top-up.</Notice> : null}
-    {sandbox ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+    {manual ? <ManualDevnetFunding address={address} context="checkout" /> : null}
+    {funding === 'simulate' ? <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
       <p className="text-sm font-semibold text-amber-900">SANDBOX SIMULATION</p>
       <p className="mt-2 text-xs leading-6 text-amber-900">This is not MoonPay. No identity check, card payment or real funds are involved. The button asks the sandbox API to simulate a deposit of devnet USDC to your wallet.</p>
       <button type="button" className={`${primaryButtonClass} mt-4`} disabled={simulation.busy || simulation.requested} onClick={onSimulate}>{simulation.requested ? 'Simulation requested' : simulation.busy ? 'Simulating...' : 'Simulate MoonPay deposit'}</button>
@@ -475,7 +508,7 @@ function TopUpRunPanel({ state, sandbox, widgetUrl, simulation, onSimulate, onCa
       <div className="flex justify-between gap-4 py-3"><dt className="text-slate-600">Spendable credits (finalized)</dt><dd className="font-mono">{p.balanceKnown && p.spendableAtomic !== null ? `${formatUsdc(p.spendableAtomic)} USDC` : 'Unknown right now'}</dd></div>
     </dl>
     {!p.balanceKnown && p.checks > 0 ? <Notice tone="warn" title="Balance unavailable or out of date">We could not confirm your balance on the last check. That is treated as unknown, not as zero and not as enough. We keep trying.</Notice> : null}
-    <p className="text-xs leading-6 text-slate-600">Funds count only once the wallet service reports them finalized. A completed MoonPay checkout alone does not count. Checking about every 3 seconds, for up to about {Math.round(DEFAULT_TIMEOUT_MINUTES)} minutes. Closing this panel stops the checking; you can resume in this tab.</p>
+    <p className="text-xs leading-6 text-slate-600">Funds count only once the wallet service reports them finalized.{manual ? '' : ' A completed MoonPay checkout alone does not count.'} Checking about every 3 seconds, for up to about {Math.round(DEFAULT_TIMEOUT_MINUTES)} minutes. Closing this panel stops the checking; you can resume in this tab.</p>
     <div aria-live="off" className="text-xs text-slate-500">{p.lastCheckedAt !== null ? `Last checked ${new Date(p.lastCheckedAt).toLocaleTimeString()}` : 'Checking...'}</div>
     {!p.persisted ? <p className="text-xs text-slate-500">This browser would not store resume information, so reloading this page will not resume the top-up.</p> : null}
     <button type="button" className={buttonClass} onClick={onCancel}>Cancel - nothing signed</button>

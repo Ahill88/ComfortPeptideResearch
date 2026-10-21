@@ -38,7 +38,7 @@ import { isNonProductionRuntime } from './config/runtime';
     LoggerModule.forRoot({
       pinoHttp: {
         // Never log credentials. Pretty transport only on exact development/test runtimes.
-        redact: { paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-admin-token"]', 'req.headers["x-customer-email"]'], censor: '[redacted]' },
+        redact: { paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-admin-token"]', 'req.headers["x-customer-email"]', 'req.headers["moonpay-signature-v2"]', 'req.headers["moonpay-signature"]'], censor: '[redacted]' },
         ...(isNonProductionRuntime(process.env) ? { transport: { target: 'pino-pretty' } } : {}),
       },
     }),

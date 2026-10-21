@@ -1,14 +1,14 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaService } from '../../prisma.service';
 import { requireApprovedEligibility } from '../../compliance/eligibility.gate';
-import { OnRampQuote, centsToAtomic } from '../contracts';
+import { centsToAtomic } from '../contracts';
 import { resolveEligibilityRequired } from '../checkout/checkout.service';
 import { KeyedLock } from '../checkout/checkout.util';
 import { CreditsService } from '../credits.service';
 import { WalletService } from '../wallet.service';
 import type { WalletRuntimeConfig } from '../wallet.config';
 import { WALLET_RUNTIME_CONFIG } from '../wallet.tokens';
-import { OnRampService } from './onramp.service';
+import { OnRampQuoteView, OnRampService } from './onramp.service';
 
 /** Optional injection token so tests and operators can supply a config object instead of reading process.env. */
 export const ONRAMP_TOPUP_CONFIG = Symbol('ONRAMP_TOPUP_CONFIG');
@@ -72,7 +72,7 @@ export type OrderTopUpResult =
       spendableAtomic: bigint;
       shortfallAtomic: bigint;
       topUpUsdCents: number;
-      quote: OnRampQuote;
+      quote: OnRampQuoteView;
       status: 'CREATED' | 'PENDING';
       /** The merchant address checkout will pay (the configured treasury), so the customer sees who is paid BEFORE consenting. null when not configured. Informational: prepare is still the authority. */
       merchant: string | null;
@@ -202,7 +202,7 @@ export class OrderTopUpService {
     topUpUsdCents: number;
     intentId: string;
     status: string;
-    quote: OnRampQuote;
+    quote: OnRampQuoteView;
   }): OrderTopUpResult {
     return {
       topUpNeeded: true,

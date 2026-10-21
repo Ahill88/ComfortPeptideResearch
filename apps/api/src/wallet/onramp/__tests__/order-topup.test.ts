@@ -15,6 +15,9 @@ class SimpleTable {
   }
 }
 
+/** Every key of an on-ramp quote as returned by the API (provider quote + the additive simulationAvailable). */
+const QUOTE_KEYS = ['destinationAddress', 'disclosures', 'estimatedFeeUsdCents', 'estimatedUsdcAtomic', 'intendedUsdCents', 'provider', 'sandbox', 'simulationAvailable', 'widgetUrl'];
+
 const NO_BUFFER: OrderTopUpConfig = { feeBufferPercent: 0, minUsd: 1, maxUsd: 10_000 };
 
 function build(config: OrderTopUpConfig = NO_BUFFER) {
@@ -93,7 +96,10 @@ test('the quote is exactly what POST /wallet/onramp would return for the same am
   const topUp = await ctx.service.topUpForOrder(customer.id, orderId);
   assert.ok(topUp.topUpNeeded);
   const plain = await ctx.h.onRamp.createIntent(customer.id, { intendedUsdCents: topUp.topUpUsdCents });
+  assert.deepEqual(Object.keys(topUp.quote).sort(), QUOTE_KEYS, 'the quote key set is exactly the contract, including the additive simulationAvailable');
   assert.deepEqual(Object.keys(topUp.quote).sort(), Object.keys(plain.quote).sort());
+  assert.equal(topUp.quote.simulationAvailable, true, 'sandbox chain: the simulate button works');
+  assert.equal(topUp.quote.simulationAvailable, plain.quote.simulationAvailable);
   assert.equal(topUp.quote.provider, plain.quote.provider);
   assert.equal(topUp.quote.destinationAddress, plain.quote.destinationAddress);
 });
@@ -389,4 +395,25 @@ test('response names the configured merchant treasury so the customer sees who i
   const result = await service.topUpForOrder(customer.id, orderId);
   assert.ok(result.topUpNeeded);
   assert.equal(result.merchant, treasury);
+});
+
+test('order-topup quotes carry simulationAvailable: true on the sandbox chain, false in devnet mode (new intent and idempotent re-quote)', async () => {
+  for (const [label, chainMode, expected] of [['sandbox', 'sandbox', true], ['devnet', 'devnet', false]] as const) {
+    const h = makeHarness({ config: { chainMode } });
+    const prisma = h.prisma as FakePrisma & { order: SimpleTable; customerEligibility: SimpleTable };
+    prisma.order = new SimpleTable();
+    prisma.customerEligibility = new SimpleTable();
+    const ctx = { h, prisma, service: new OrderTopUpService(h.db as PrismaService, h.credits, h.onRamp, h.wallets, NO_BUFFER) };
+    const { customer } = await customerWith(ctx, `${label}@example.com`, 0);
+    const orderId = addOrder(ctx, customer.id, 300);
+    const first = await ctx.service.topUpForOrder(customer.id, orderId);
+    const again = await ctx.service.topUpForOrder(customer.id, orderId);
+    assert.ok(first.topUpNeeded && again.topUpNeeded);
+    assert.equal(again.intentId, first.intentId, `${label}: second call re-quotes the same intent`);
+    assert.deepEqual(Object.keys(first.quote).sort(), QUOTE_KEYS, label);
+    assert.deepEqual(Object.keys(again.quote).sort(), QUOTE_KEYS, label);
+    assert.equal(first.quote.simulationAvailable, expected, `${label}: new intent`);
+    assert.equal(again.quote.simulationAvailable, expected, `${label}: re-quote`);
+    assert.equal(first.quote.provider, 'moonpay-sandbox', `${label}: the provider label itself does not change`);
+  }
 });

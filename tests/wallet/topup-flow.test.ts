@@ -12,10 +12,10 @@ import { strict as assert } from 'node:assert';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import {
-  DEFAULT_TOPUP_OPTIONS, TOPUP_STORAGE_KEY, createTopUpRun, createTopUpStore, findResumableTopUp, parseTopUpRecord, safeWidgetUrl,
+  CIRCLE_FAUCET_URL, DEFAULT_TOPUP_OPTIONS, SOLANA_FAUCET_URL, TOPUP_STORAGE_KEY, createTopUpRun, createTopUpStore, findResumableTopUp, fundingOf, manualDevnetCopy, parseTopUpRecord, quoteFundingMode, safeWidgetUrl,
   type BalanceRead, type KeyValueStorage, type PreparedPayment, type TopUpDeps, type TopUpPlan, type TopUpState, type WidgetOpenResult,
 } from '../../apps/storefront/lib/wallet/topup-flow';
-import { createOrderTopUp, normalizeOrderTopUp } from '../../apps/storefront/lib/wallet/api';
+import { createOrderTopUp, normalizeOnrampQuote, normalizeOrderTopUp } from '../../apps/storefront/lib/wallet/api';
 import { ROOT, read } from './_helpers';
 
 const REQUIRED = 100_000_000n; // 100 USDC
@@ -358,7 +358,7 @@ test('reload: a new run built from the sessionStorage record resumes polling, do
 
   const raw = storage.getItem(TOPUP_STORAGE_KEY);
   assert.ok(raw, 'record written');
-  assert.deepEqual(Object.keys(JSON.parse(raw as string)).sort(), ['baselineSpendableAtomic', 'consentedAt', 'email', 'intentId', 'orderId', 'payStartedAt', 'requiredAtomic', 'sandbox', 'v'], 'only public identifiers are persisted');
+  assert.deepEqual(Object.keys(JSON.parse(raw as string)).sort(), ['baselineSpendableAtomic', 'consentedAt', 'email', 'funding', 'intentId', 'orderId', 'payStartedAt', 'requiredAtomic', 'sandbox', 'v'], 'only public identifiers are persisted (funding is a 3-value enum)');
   assert.ok(!/key|secret|seed|signature|signed|mnemonic/i.test(raw as string), 'no key/secret-like content in the record');
 
   const second = harness({ storage, reads: [fresh(0n), fresh(REQUIRED)] });
@@ -578,6 +578,7 @@ test('normalizeOrderTopUp: top-up needed keeps bigints exact and the disclosures
   assert.equal(r.intentId, 'i1');
   assert.equal(r.quote.intentId, 'i1');
   assert.equal(r.quote.sandbox, true);
+  assert.equal(r.quote.simulationAvailable, false, 'an API that omits simulationAvailable never shows the simulate button');
   assert.equal(r.quote.estimatedUsdcAtomic, 85_000_000n);
   assert.deepEqual(r.quote.disclosures, ['MoonPay sets its own fees.', 'Second.']);
   assert.equal(r.merchant, null);
@@ -615,6 +616,158 @@ test('createOrderTopUp posts only {orderId} with the account header to /wallet/o
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+/* ------------------------------ funding mode: simulate vs widget vs manual devnet ------------------------------ */
+
+test('normalizeOnrampQuote: simulationAvailable defaults to false and only an explicit true enables it', () => {
+  const base = { provider: 'moonpay-sandbox', sandbox: true, widgetUrl: '/wallet/sandbox-onramp?intent=i1', disclosures: [] };
+  assert.equal(normalizeOnrampQuote(base, 'i1').simulationAvailable, false, 'omitted (old API)');
+  for (const bad of ['true', 1, null, 'yes', {}, []]) assert.equal(normalizeOnrampQuote({ ...base, simulationAvailable: bad }, 'i1').simulationAvailable, false, JSON.stringify(bad));
+  assert.equal(normalizeOnrampQuote({ ...base, simulationAvailable: false }, 'i1').simulationAvailable, false);
+  assert.equal(normalizeOnrampQuote({ ...base, simulationAvailable: true }, 'i1').simulationAvailable, true);
+  assert.equal(normalizeOnrampQuote(null, 'i1').simulationAvailable, false);
+  // Both quote entry points go through the same normalizer.
+  const topUp = normalizeOrderTopUp({ topUpNeeded: true, orderId: 'o1', intentId: 'i1', requiredAtomic: '1', spendableAtomic: '0', shortfallAtomic: '1', topUpUsdCents: 1, quote: { ...base, simulationAvailable: true }, status: 'CREATED' });
+  assert.ok(topUp.topUpNeeded && topUp.quote.simulationAvailable === true);
+});
+
+test('createOnrampQuote reads simulationAvailable from the nested quote', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    for (const [wire, expected] of [[true, true], [false, false], [undefined, false]] as const) {
+      globalThis.fetch = (async () => new Response(JSON.stringify({ intentId: 'i7', status: 'CREATED', quote: { provider: 'moonpay-sandbox', sandbox: true, widgetUrl: '/x', disclosures: [], ...(wire === undefined ? {} : { simulationAvailable: wire }) } }), { status: 200 })) as typeof fetch;
+      const { createOnrampQuote } = await import('../../apps/storefront/lib/wallet/api');
+      const quote = await createOnrampQuote('buyer@example.com', 5000);
+      assert.equal(quote.simulationAvailable, expected, String(wire));
+      assert.equal(quote.intentId, 'i7');
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('quoteFundingMode: the simulate button needs sandbox AND simulationAvailable; devnet without MoonPay is manual; real MoonPay is a widget', () => {
+  const local = { provider: 'moonpay-sandbox', sandbox: true };
+  assert.equal(quoteFundingMode({ ...local, simulationAvailable: true }), 'simulate');
+  assert.equal(quoteFundingMode({ ...local, simulationAvailable: false }), 'manual-devnet');
+  assert.equal(quoteFundingMode({ ...local }), 'manual-devnet', 'field missing (old API) is false, never a dead button');
+  // Real MoonPay: never simulate, never the "not connected" panel, even for MoonPay's own sandbox host (provider is real there).
+  assert.equal(quoteFundingMode({ provider: 'moonpay', sandbox: false, simulationAvailable: false }), 'widget');
+  assert.equal(quoteFundingMode({ provider: 'moonpay', sandbox: true, simulationAvailable: false }), 'widget');
+  assert.equal(quoteFundingMode({ provider: 'moonpay', sandbox: false }), 'widget');
+  // simulationAvailable without sandbox is not honoured (the API never sends it; the UI does not trust it either).
+  assert.equal(quoteFundingMode({ provider: 'moonpay', sandbox: false, simulationAvailable: true }), 'widget');
+  // Exhaustive: 'simulate' appears for exactly one input combination class.
+  const simulating: string[] = [];
+  for (const provider of ['moonpay', 'moonpay-sandbox', undefined]) for (const sandbox of [true, false]) for (const simulationAvailable of [true, false, undefined]) {
+    if (quoteFundingMode({ provider, sandbox, simulationAvailable }) === 'simulate') simulating.push(`${provider}/${sandbox}/${simulationAvailable}`);
+  }
+  assert.ok(simulating.every((combo) => combo.endsWith('/true/true')), simulating.join(', '));
+});
+
+test('fundingOf: legacy plans and records derive from sandbox; an explicit funding wins', () => {
+  assert.equal(fundingOf({ sandbox: true }), 'simulate');
+  assert.equal(fundingOf({ sandbox: false }), 'widget');
+  assert.equal(fundingOf({ sandbox: true, funding: 'manual-devnet' }), 'manual-devnet');
+  assert.equal(fundingOf({ sandbox: true, funding: 'widget' }), 'widget');
+});
+
+test('manual-devnet plans never open a window, never need MoonPay, and still auto-pay when the balance rises (faucet drip)', async () => {
+  const h = harness({ plan: { sandbox: true, funding: 'manual-devnet', widgetUrl: '/wallet/sandbox-onramp?intent=intent-1' }, reads: [fresh(0n), fresh(0n), fresh(REQUIRED)] });
+  h.run.start();
+  assert.equal(lastWaiting(h).progress.widget, 'sandbox');
+  assert.equal((await h.run.whenSettled()).kind, 'submitted');
+  assert.equal(h.counts.open, 0);
+  assert.deepEqual([h.counts.prepare, h.counts.sign, h.counts.submit], [1, 1, 1]);
+});
+
+test('manual-devnet plans still need consent: no consent, nothing is watched or signed', async () => {
+  const h = harness({ plan: { sandbox: true, funding: 'manual-devnet', consentedAt: null }, reads: [fresh(REQUIRED)] });
+  assert.deepEqual(h.run.start(), { kind: 'blocked', reason: 'consent-required' });
+  await ticks(10);
+  assert.deepEqual([h.counts.fetch, h.counts.sign], [0, 0]);
+});
+
+test('a widget plan on MoonPay\'s own sandbox host (sandbox:true, funding:widget) still opens the real window', () => {
+  const h = harness({ plan: { sandbox: true, funding: 'widget' }, reads: [fresh(0n)] });
+  h.run.start();
+  assert.equal(h.counts.open, 1);
+  assert.equal(lastWaiting(h).progress.widget, 'opened');
+  h.run.suspend();
+});
+
+test('the funding mode survives a reload: a manual-devnet record resumes as manual-devnet (never as a simulate button)', async () => {
+  const storage = memoryStorage();
+  const first = harness({ storage, plan: { sandbox: true, funding: 'manual-devnet' }, reads: [fresh(0n)] });
+  first.run.start();
+  await ticks(5);
+  first.run.suspend();
+  const found = findResumableTopUp(createTopUpStore(storage), EMAIL, T0 + 1000);
+  assert.equal(found.kind, 'resume');
+  if (found.kind !== 'resume') return;
+  assert.equal(found.record.funding, 'manual-devnet');
+  assert.equal(fundingOf(found.plan), 'manual-devnet');
+  assert.equal(found.plan.sandbox, true);
+  // Records written before `funding` existed, and junk values, are read defensively.
+  const legacy = JSON.parse(storage.getItem(TOPUP_STORAGE_KEY) as string);
+  delete legacy.funding;
+  assert.equal(parseTopUpRecord(JSON.stringify(legacy))?.funding, 'simulate');
+  assert.equal(parseTopUpRecord(JSON.stringify({ ...legacy, sandbox: false }))?.funding, 'widget');
+  assert.equal(parseTopUpRecord(JSON.stringify({ ...legacy, funding: 'wire-transfer' }))?.funding, 'simulate');
+});
+
+test('manual-devnet copy: faucet links and devnet SOL guidance, and NO MoonPay purchase wording', () => {
+  for (const context of ['add-credits', 'checkout'] as const) {
+    const copy = manualDevnetCopy(context);
+    const text = JSON.stringify(copy);
+    assert.equal(copy.usdcStep.url, 'https://faucet.circle.com');
+    assert.equal(copy.solNote.url, 'https://faucet.solana.com');
+    assert.equal(CIRCLE_FAUCET_URL, copy.usdcStep.url);
+    assert.equal(SOLANA_FAUCET_URL, copy.solNote.url);
+    assert.match(copy.intro, /^MoonPay is not connected in this environment, and simulated deposits only work on the in-memory sandbox chain\. This wallet is on Solana devnet\. To add test credits, send devnet USDC to your wallet address/);
+    assert.match(copy.usdcStep.before, /choose Solana and USDC/i);
+    assert.match(copy.solNote.before, /Devnet SOL is not needed to pay at checkout when the platform pays the network fee, but it is needed for withdrawals/);
+    // MoonPay is mentioned only to say it is NOT connected. Nothing may suggest a purchase, card, bank, widget or simulation.
+    assert.equal((text.match(/MoonPay/g) ?? []).length, 2, 'only the "not connected" title and intro mention MoonPay');
+    assert.ok(!/\b(buy|bought|purchase|card|bank|checkout\s+with|open moonpay|continue to moonpay|via moonpay|top up \$|simulate deposit)\b/i.test(text.replace(/to pay at checkout/g, '')), text);
+    assert.ok(!/invented|guarantee|instant|\d+\s*USDC|within \d+/i.test(text), 'no invented amounts or timings');
+  }
+  assert.match(manualDevnetCopy('checkout').watch, /pays this order automatically/);
+  assert.match(manualDevnetCopy('checkout').watch, /faucet/);
+  assert.match(manualDevnetCopy('add-credits').watch, /Credits appear once the devnet USDC has arrived/);
+});
+
+test('components: the simulate button is rendered only in simulate mode; manual-devnet shows the address, Copy address and faucet links', () => {
+  const add = read(path.join(ROOT, 'apps/storefront/components/wallet/add-credits-flow.tsx'));
+  const checkout = read(path.join(ROOT, 'apps/storefront/components/wallet/credits-checkout.tsx'));
+  const manual = read(path.join(ROOT, 'apps/storefront/components/wallet/manual-devnet-funding.tsx'));
+  for (const [name, src] of [['add-credits-flow', add], ['credits-checkout', checkout]] as const) {
+    assert.match(src, /quoteFundingMode\(/, name);
+    assert.ok(!/quote\.sandbox \? <div className="rounded-xl border border-amber/.test(src), `${name}: no sandbox-only gate on the simulate block`);
+    assert.ok(!/\{sandbox \? <div/.test(src), `${name}: no legacy sandbox flag gate`);
+  }
+  assert.match(add, /mode === 'simulate' \? <div[\s\S]{0,900}Simulate MoonPay deposit/);
+  assert.match(checkout, /funding === 'simulate' \? <div[\s\S]{0,900}Simulate MoonPay deposit/);
+  assert.equal([...add.matchAll(/Simulate MoonPay deposit/g)].length, 1);
+  assert.equal([...checkout.matchAll(/Simulate MoonPay deposit/g)].length, 1);
+  assert.match(add, /<ManualDevnetFunding address=\{wallet\.address\} context="add-credits" \/>/);
+  assert.match(checkout, /<ManualDevnetFunding address=\{address\} context="checkout" \/>/);
+  assert.match(manual, /<CopyButton value=\{address\} label="Copy address" \/>/);
+  assert.match(manual, /href=\{copy\.usdcStep\.url\}/);
+  assert.match(manual, /href=\{copy\.solNote\.url\}/);
+  assert.match(manual, /rel="noopener noreferrer"/);
+});
+
+test('component: in manual-devnet the checkout offer has no MoonPay purchase wording or Buy/Top-up button', () => {
+  const src = read(path.join(ROOT, 'apps/storefront/components/wallet/credits-checkout.tsx'));
+  const start = src.indexOf('if (manual) return <div className="space-y-5">');
+  const end = src.indexOf("  return <div className=\"space-y-5\">\n    <div>\n      <p className=\"text-base font-semibold leading-7\">Buy $", start);
+  assert.ok(start > 0 && end > start, 'manual branch located');
+  const branch = src.slice(start, end);
+  assert.ok(!/via MoonPay|Open MoonPay|Buy \$|Top up \$|card or bank|ID checks|quote\.disclosures/.test(branch), 'no purchase wording or MoonPay disclosures in the manual branch');
+  assert.match(branch, /Wait for devnet USDC, then pay/);
+  assert.match(branch, /disabled=\{!agreed\}/, 'auto-pay consent is still required');
 });
 
 /* ------------------------------ network fee: who pays decides whether SOL matters ------------------------------ */

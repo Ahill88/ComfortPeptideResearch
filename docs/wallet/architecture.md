@@ -62,7 +62,7 @@ The three failing readiness tests for real sessions, MFA/email verification, and
 2. Sandbox (default, `ENABLE_REAL_MOONPAY` off): `sandbox: true` quote with null fee/amount estimates and a local widget path. `POST /v1/wallet/onramp/:id/mock-complete` credits the in-memory `SandboxSolanaChain` and writes a `DEPOSIT` row. It returns 403 unless `WALLET_CHAIN_MODE=sandbox`, not production, and the chain is the sandbox class.
 3. Real (`ENABLE_REAL_MOONPAY=true` plus `MOONPAY_PUBLISHABLE_KEY`/`MOONPAY_SECRET_KEY`): builds a signed widget URL (HMAC-SHA256 over the query string, `usdc_sol`, whole-dollar amounts only). `pk_test_` keys use MoonPay's sandbox host and `pk_live_` keys additionally require `ENABLE_SOLANA_MAINNET`. This path was **never called against MoonPay**; see `providers.md`.
 4. **Credits come from the observed finalized on-chain balance, not from a MoonPay status.** `OnRampIntent.status` is never read when computing credits.
-5. **No MoonPay webhook handler exists.** Event names and signature scheme are unverified. In real mode an intent therefore stays `CREATED` forever, and `externalReference` is never set. Only the sandbox mock sets `COMPLETED`.
+5. **MoonPay webhook receiver exists but has never received a real event** (`POST /v1/webhooks/moonpay`, `onramp/moonpay-webhook.*`; signature, idempotency and ordering per MoonPay's docs). It only updates `OnRampIntent.status`/`externalReference` and the audit trail; it never credits or pays anything. With no `MOONPAY_WEBHOOK_KEY` it answers 503.
 
 ### 3. Credits derivation
 Implemented in `CreditsService.getBalance` (`apps/api/src/wallet/credits.service.ts`) with the pure math in `computeSpendable` (`contracts.ts`):
@@ -139,7 +139,7 @@ Note that adding this signing service changes the "platform has no signing code 
 | Privy | A descriptor only (`apps/api/src/wallet/wallet-providers.ts`). No SDK, no embedded wallet, no check that an address came from Privy. |
 | Sandbox wallet | A browser-held devnet key in `localStorage` (`SandboxBrowserSigner`). Exposed to any script on the origin (XSS), lost when storage is cleared, not for real funds. |
 | MoonPay real mode | Builds a signed widget URL per the parameters in the code comment (checked against dev.moonpay.com on 2026-10-20 by the author; not re-verified here). Never called against MoonPay. |
-| MoonPay webhooks | Do not exist. |
+| MoonPay webhooks | Receiver implemented and tested with signed synthetic events; never received a real MoonPay event. 503 when `MOONPAY_WEBHOOK_KEY` is unset. |
 | Compliance screen | Allows everything. |
 | Prepared message stores | `InMemoryPreparedTransactionStore` (transfers, token `PREPARED_TX_STORE` in `wallet.module.ts`) and `InMemoryPreparedMessageStore` (checkout, token `PREPARED_MESSAGE_STORE` in `checkout.module.ts`). Lost on restart and not shared between instances; submit fails closed and the customer re-prepares. A persistent shared store is required for more than one instance. |
 | Reservation lock | `KeyedLock` in `checkout.util.ts` is per process. Cross-process safety relies on the unique `CreditReservation.orderId` and compare-and-set updates, which no test has run against Postgres. |
