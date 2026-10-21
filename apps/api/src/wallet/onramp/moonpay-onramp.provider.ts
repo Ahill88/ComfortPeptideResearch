@@ -9,7 +9,7 @@ import { WalletRuntimeConfig } from '../wallet.config';
  * MoonPay parameters used here were checked against dev.moonpay.com on 2026-10-20:
  *   widget/on-ramp/customization/parameters, widget/on-ramp/customization/url-signing,
  *   widget/on-ramp/customization/ip-matching, and the public /v3/currencies list (usdc_sol).
- * Verified: apiKey, currencyCode, walletAddress, baseCurrencyCode, baseCurrencyAmount
+ * Verified: apiKey, currencyCode, walletAddress, baseCurrencyCode, quoteCurrencyAmount
  * (positive integer of fiat units), externalCustomerId, externalTransactionId, allowedIpAddress.
  *
  * TODO(verified-docs-required): MoonPay webhook handling (event names, endpoint, signature
@@ -33,7 +33,7 @@ export interface MoonPayQuoteInput {
 
 export const MOONPAY_DISCLOSURES = [
   'MoonPay (not Helix & Field) performs identity verification and payment processing for this purchase, under MoonPay\'s own terms.',
-  'Fees and exchange rates are set by MoonPay and are shown by MoonPay before you confirm. This quote contains no estimate.',
+  'Fees and exchange rates are set by MoonPay. You buy a fixed amount of USDC; MoonPay adds its fees on top and shows the total you will pay before you confirm. This quote contains no estimate.',
   'Purchased USDC is delivered to your own wallet address. Helix & Field does not custody it and cannot reverse a delivery.',
   'Availability, limits and settlement time are determined by MoonPay and may vary by region and payment method.',
 ];
@@ -172,8 +172,8 @@ export class MoonPayOnRampProvider implements OnRampProvider {
       throw new ServiceUnavailableException('MOONPAY_PUBLISHABLE_KEY must start with pk_test_ or pk_live_');
     }
     if (input.intendedUsdCents % 100 !== 0) {
-      // baseCurrencyAmount is documented as a positive integer, so fractional dollars cannot be pre-filled.
-      throw new BadRequestException('MoonPay purchases must be a whole number of US dollars');
+      // quoteCurrencyAmount is documented as a positive integer (whole USDC), so fractional amounts cannot be pre-filled.
+      throw new BadRequestException('MoonPay purchases must be a whole number of USDC');
     }
 
     const params: Array<[string, string]> = [
@@ -181,7 +181,11 @@ export class MoonPayOnRampProvider implements OnRampProvider {
       ['currencyCode', MOONPAY_SOLANA_USDC_CURRENCY_CODE],
       ['walletAddress', input.destinationAddress],
       ['baseCurrencyCode', 'usd'],
-      ['baseCurrencyAmount', String(input.intendedUsdCents / 100)],
+      // Size the purchase in USDC, not dollars. Checked against MoonPay's buy_quote API on 2026-10-21 (usdc_sol, card): with
+      // quoteCurrencyAmount=N the customer receives exactly N USDC and MoonPay's fees are added to what they pay, whereas a
+      // dollar amount buys about 1.7% fewer USDC than the dollars entered (USDC was quoted at about $1.017) and so could leave
+      // the order short. One dollar of intendedUsdCents is one USDC of target balance (the platform's own 1 USD = 1 USDC rule).
+      ['quoteCurrencyAmount', String(input.intendedUsdCents / 100)],
       ['externalCustomerId', input.customerId],
       ['externalTransactionId', input.intentId],
     ];

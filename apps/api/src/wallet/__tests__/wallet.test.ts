@@ -207,9 +207,10 @@ test('real MoonPay quote builds a signed URL with only verified parameters', asy
   const url = new URL(quote.widgetUrl);
   assert.equal(url.origin, 'https://buy-sandbox.moonpay.com');
   const p = url.searchParams;
-  assert.deepEqual([...p.keys()], ['apiKey', 'currencyCode', 'walletAddress', 'baseCurrencyCode', 'baseCurrencyAmount', 'externalCustomerId', 'externalTransactionId', 'allowedIpAddress', 'signature']);
+  assert.deepEqual([...p.keys()], ['apiKey', 'currencyCode', 'walletAddress', 'baseCurrencyCode', 'quoteCurrencyAmount', 'externalCustomerId', 'externalTransactionId', 'allowedIpAddress', 'signature']);
   assert.equal(p.get('walletAddress'), wallet);
-  assert.equal(p.get('baseCurrencyAmount'), '50');
+  assert.equal(p.get('quoteCurrencyAmount'), '50', 'the purchase is sized in USDC so MoonPay fees are added on top');
+  assert.equal(p.has('baseCurrencyAmount'), false);
   assert.equal(p.get('externalTransactionId'), 'intent-1');
   assert.equal(p.get('currencyCode'), 'usdc_sol');
   // signature covers exactly the query string (with leading ?) preceding &signature=
