@@ -38,6 +38,19 @@ model Customer {
   cryptoTransactions CryptoTransaction[]
   creditReservations CreditReservation[]
   eligibility CustomerEligibility?
+  // Customer account credentials. A Customer row may exist without them (created by an order); registration attaches a
+  // password only after the email is verified, so nobody can claim an address they do not control.
+  passwordHash String?
+  emailVerifiedAt DateTime?
+  mfaSeedEnc String?
+  mfaEnabledAt DateTime?
+  lastTotpStep Int?
+  failedLogins Int @default(0)
+  lockedUntil DateTime?
+  lastLoginAt DateTime?
+  sessions CustomerSession[]
+  tokens CustomerToken[]
+  addresses CustomerAddress[]
 }
 model Product {
   id String @id @default(cuid())
@@ -47,7 +60,9 @@ model Product {
   active Boolean @default(false)
   priceCents Int
   inventory Int @default(0)
+  lowStockThreshold Int?
   lots Lot[]
+  adjustments InventoryAdjustment[]
 }
 model Lot {
   id String @id @default(cuid())
@@ -77,6 +92,13 @@ model Order {
   creditReservation CreditReservation?
   // Snapshot of where to ship, exactly as the customer entered it at order time (free text today). NULL only for orders created before this column existed.
   shippingAddress String?
+  // Totals: totalCents = subtotalCents + shippingCents + taxCents. Orders created before these columns have subtotalCents NULL (total only).
+  subtotalCents Int?
+  shippingCents Int @default(0)
+  taxCents Int @default(0)
+  // Stock is held from creation; unpaid orders release it at expiresAt (or on cancel). inventoryReleasedAt makes the release idempotent.
+  expiresAt DateTime?
+  inventoryReleasedAt DateTime?
   shipments Shipment[]
   events OrderEvent[]
   @@unique([customerId, idempotencyKey])
@@ -412,4 +434,134 @@ model CoaAnchor {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@unique([coaId, kind])
+}
+
+// ---------------------------------------------------------------------------
+// Customer accounts: sessions (opaque cookie token, only its SHA-256 stored), one-time tokens (email verification, password reset),
+// saved addresses. Transactional email goes through an outbox so a provider outage never loses or blocks a message.
+// ---------------------------------------------------------------------------
+enum CustomerTokenPurpose {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+model CustomerSession {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  tokenHash String @unique
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip String?
+  userAgent String?
+  @@index([customerId])
+}
+model CustomerToken {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  purpose CustomerTokenPurpose
+  tokenHash String @unique
+  expiresAt DateTime
+  usedAt DateTime?
+  createdAt DateTime @default(now())
+  @@index([customerId, purpose])
+}
+model CustomerAddress {
+  id String @id @default(cuid())
+  customerId String
+  customer Customer @relation(fields:[customerId], references:[id])
+  label String?
+  recipient String
+  line1 String
+  line2 String?
+  city String
+  region String
+  postalCode String
+  country String
+  isDefault Boolean @default(false)
+  createdAt DateTime @default(now())
+  @@index([customerId])
+}
+enum EmailStatus {
+  PENDING
+  SENDING
+  SENT
+  FAILED
+}
+model EmailOutbox {
+  id String @id @default(cuid())
+  toEmail String
+  template String
+  data Json
+  status EmailStatus @default(PENDING)
+  attempts Int @default(0)
+  lastError String?
+  providerMessageId String?
+  dedupeKey String? @unique
+  createdAt DateTime @default(now())
+  nextAttemptAt DateTime @default(now())
+  sentAt DateTime?
+  @@index([status, nextAttemptAt])
+}
+
+// ---------------------------------------------------------------------------
+// Inventory ledger. Product.inventory is the on-hand number; every change is a signed row here (never edited, never deleted).
+// ---------------------------------------------------------------------------
+enum InventoryKind {
+  ORDER_RESERVE
+  ORDER_RELEASE
+  ADMIN_ADJUST
+}
+model InventoryAdjustment {
+  id String @id @default(cuid())
+  productId String
+  product Product @relation(fields:[productId], references:[id])
+  delta Int
+  kind InventoryKind
+  reason String?
+  orderId String?
+  adminId String?
+  createdAt DateTime @default(now())
+  @@unique([orderId, productId, kind])
+  @@index([productId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Durable prepared transaction messages (survive restarts, shared by every API instance).
+// ---------------------------------------------------------------------------
+model PreparedMessage {
+  key String @id
+  kind String
+  payload Json
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  @@index([kind, expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Sanctions screening data (public OFAC SDN list: digital currency addresses). Screening supports a compliance programme; it is not one.
+// ---------------------------------------------------------------------------
+model SanctionsListRun {
+  id String @id @default(cuid())
+  source String
+  fetchedAt DateTime @default(now())
+  entryCount Int @default(0)
+  sha256 String?
+  status String
+  error String?
+  addresses SanctionsAddress[]
+}
+model SanctionsAddress {
+  id String @id @default(cuid())
+  source String
+  address String
+  currency String?
+  entryUid String?
+  listedName String?
+  runId String
+  run SanctionsListRun @relation(fields:[runId], references:[id])
+  @@unique([source, address])
+  @@index([address])
 }
