@@ -42,6 +42,13 @@ export class CreateOnRampDto {
   amountUsdCents!: number;
 }
 
+export class OrderTopUpDto {
+  @ApiProperty({ description: 'The PENDING_PAYMENT order (owned by the caller) that the customer wants to pay with Research Credits.' })
+  @IsString()
+  @Length(1, 64)
+  orderId!: string;
+}
+
 export class PrepareTransferDto {
   @ApiProperty({ description: 'Destination Solana wallet address (owner address, not a token account).' })
   @IsString()

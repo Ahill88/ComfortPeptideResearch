@@ -5,6 +5,7 @@
  */
 import { PublicKey, SystemProgram, VersionedTransaction } from '@solana/web3.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
+import type { CheckoutPreparation } from './api';
 
 /** USDC mint on Solana devnet (matches the API contract). Devnet only. */
 export const USDC_DEVNET_MINT = '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
@@ -25,7 +26,7 @@ export function base64ToBytes(value: string): Uint8Array {
 }
 
 export type ExpectedTransfer = {
-  /** The customer's wallet address: fee payer, sole signer and token authority. */
+  /** The customer's wallet address: token authority and signer (and the fee payer too, unless feeSponsored). */
   signer: string;
   /** OWNER address of the recipient (not a token account). */
   destinationOwner: string;
@@ -41,7 +42,24 @@ export type ExpectedTransfer = {
   referenceKey?: string;
   /** Defaults to the devnet USDC mint. */
   mint?: string;
+  /**
+   * checkout only. True when the platform pays the network fee: the transaction must then have exactly two signers,
+   * [platform fee payer, customer], the fee payer being `feePayer`, and that key must appear nowhere else in the message.
+   * Default false: the customer's wallet must be the fee payer and sole signer (unchanged behaviour).
+   */
+  feeSponsored?: boolean;
+  /** The fee payer the API announced (base58). Required when feeSponsored; when not sponsored it may only be null/undefined or the customer's wallet. */
+  feePayer?: string | null;
 };
+
+/** What the signer must be told when the fee is sponsored so it can refuse anything but the expected two-signer shape. */
+export type SigningOptions = { sponsoredFeePayer?: string };
+
+export function signingOptionsFor(prep: { feeSponsored: boolean; feePayer: string | null }): SigningOptions | undefined {
+  if (!prep.feeSponsored) return undefined;
+  if (!prep.feePayer) throw new Error('The payment is marked fee-sponsored but names no fee payer. Nothing was signed.');
+  return { sponsoredFeePayer: prep.feePayer };
+}
 
 /** Solana-Pay-style reference key the API derives: sha256(paymentReference) as a public key. Null if WebCrypto is unavailable. */
 export async function referenceKeyFor(paymentReference: string): Promise<string | null> {
@@ -60,7 +78,8 @@ const ATA_CREATE_IDEMPOTENT = 1;
 /**
  * Strict pre-sign check. Returns a list of mismatches; an EMPTY list means the transaction is
  * byte-for-byte the shape the API builds and nothing else:
- *   legacy message, 1 signature, fee payer = customer,
+ *   legacy message, 1 signature, fee payer = customer (or, when the platform sponsors the fee, 2 signatures
+ *   [platform fee payer, customer] with the fee payer referenced by no instruction),
  *   [optional idempotent ATA create for the recipient (transfer only)] + one TransferChecked
  *   customer ATA -> recipient ATA for exactly the shown amount in the expected mint
  *   (+ one read-only non-signer reference account for checkout).
@@ -86,8 +105,36 @@ export function verifyUsdcTransfer(unsignedBase64: string, expected: ExpectedTra
     if (message.addressTableLookups.length > 0) problems.push('The transaction uses address lookup tables and cannot be verified locally.');
     const keys = message.staticAccountKeys.map((key) => key.toBase58());
     const { numRequiredSignatures, numReadonlySignedAccounts } = message.header;
-    if (numRequiredSignatures !== 1 || numReadonlySignedAccounts !== 0 || tx.signatures.length !== 1) problems.push('The transaction must require exactly one signature (yours).');
-    if (keys[0] !== expected.signer) problems.push('Your wallet must be the fee payer and only signer.');
+    const sponsored = expected.feeSponsored === true;
+    const claimedFeePayer = expected.feePayer ?? null;
+    if (!sponsored) {
+      if (numRequiredSignatures !== 1 || numReadonlySignedAccounts !== 0 || tx.signatures.length !== 1) problems.push('The transaction must require exactly one signature (yours).');
+      if (keys[0] !== expected.signer) problems.push('Your wallet must be the fee payer and only signer.');
+      if (claimedFeePayer !== null && claimedFeePayer !== expected.signer) problems.push('The service names a fee payer other than your wallet but did not mark the fee as sponsored.');
+    } else if (!checkout) {
+      problems.push('A sponsored network fee is only supported for checkout payments.');
+    } else {
+      // Platform-paid fee: [fee payer, customer] sign; the fee payer exists only to pay the fee and must be inert everywhere else.
+      let announced: string | null = null;
+      try { announced = claimedFeePayer ? new PublicKey(claimedFeePayer).toBase58() : null; } catch { announced = null; }
+      if (!announced || announced !== claimedFeePayer) problems.push('The service did not name a valid fee payer for the sponsored network fee.');
+      if (announced === expected.signer) problems.push('The fee is marked as sponsored but the named fee payer is your own wallet.');
+      if (announced === expected.destinationOwner) problems.push('The fee payer must not be the merchant address.');
+      if (keys[0] === expected.signer) problems.push('The fee is marked as sponsored but your own wallet is the transaction fee payer.');
+      else if (announced && keys[0] !== announced) problems.push('The transaction fee payer is not the fee payer the service announced.');
+      // The customer (token authority) is normally a READ-ONLY signer here; the fee payer in slot 0 is always writable, so at most one signer is read-only.
+      if (numRequiredSignatures !== 2 || numReadonlySignedAccounts > 1 || tx.signatures.length !== 2) problems.push('A fee-sponsored transaction must require exactly two signatures (the fee payer and yours).');
+      if (!keys.slice(0, numRequiredSignatures).includes(expected.signer) || keys[1] !== expected.signer) problems.push('Your wallet must be the second signer of a fee-sponsored transaction.');
+      if (keys[0] !== undefined) {
+        const feePayerKey = keys[0];
+        if (keys.filter((key) => key === feePayerKey).length !== 1) problems.push('The fee payer key appears more than once in the transaction.');
+        const referencesFeePayer = message.compiledInstructions.some((ix) => ix.programIdIndex === 0 || ix.accountKeyIndexes.includes(0));
+        if (referencesFeePayer) problems.push('The fee payer account is used inside an instruction; it may only pay the network fee.');
+        const referenced = new Set<number>([0, 1]);
+        for (const ix of message.compiledInstructions) { referenced.add(ix.programIdIndex); for (const index of ix.accountKeyIndexes) referenced.add(index); }
+        if (keys.some((_, index) => !referenced.has(index))) problems.push('The transaction lists accounts that no instruction uses.');
+      }
+    }
     if (expected.amountAtomic <= 0n) problems.push('The amount must be greater than zero.');
 
     const instructions = message.compiledInstructions;
@@ -142,4 +189,20 @@ export function verifyUsdcTransfer(unsignedBase64: string, expected: ExpectedTra
     problems.push('The transaction could not be checked against the expected recipient.');
   }
   return Array.from(new Set(problems));
+}
+
+/**
+ * Everything that must hold before this browser may sign a prepared CHECKOUT payment, other than amount/recipient/expiry
+ * (the top-up run checks those itself). The component and the tests call exactly this.
+ */
+export async function checkoutPreparationProblems(prep: CheckoutPreparation, signerAddress: string): Promise<string[]> {
+  const problems: string[] = [];
+  if (prep.network !== 'solana-devnet') problems.push(`Network "${prep.network}" is not supported by the sandbox wallet (Solana devnet only).`);
+  // Exactly what the API builds: one TransferChecked (customer ATA -> merchant ATA) plus one read-only reference account = sha256(paymentReference).
+  const referenceKey = await referenceKeyFor(prep.paymentReference);
+  problems.push(...verifyUsdcTransfer(prep.unsignedTransactionBase64, {
+    signer: signerAddress, destinationOwner: prep.merchant, amountAtomic: prep.amountAtomic, purpose: 'checkout', referenceKey: referenceKey ?? undefined,
+    feeSponsored: prep.feeSponsored, feePayer: prep.feePayer,
+  }));
+  return problems;
 }

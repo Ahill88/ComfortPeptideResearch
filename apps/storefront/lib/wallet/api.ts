@@ -80,6 +80,23 @@ export type OnrampQuote = {
   intentId: string;
 };
 
+/** POST /wallet/onramp/order-topup: either nothing is needed, or a card/bank top-up covering the shortfall for this order. */
+export type OrderTopUp =
+  | { topUpNeeded: false; orderId: string; requiredAtomic: bigint; spendableAtomic: bigint }
+  | {
+    topUpNeeded: true;
+    orderId: string;
+    intentId: string;
+    requiredAtomic: bigint;
+    spendableAtomic: bigint;
+    shortfallAtomic: bigint;
+    topUpUsdCents: number;
+    quote: OnrampQuote;
+    status: 'CREATED' | 'PENDING';
+    /** Merchant payment address, only if the API volunteers it. The contract does not require it. */
+    merchant: string | null;
+  };
+
 export type TransferPreparation = { id: string; unsignedTransactionBase64: string; feeLamports: bigint | null; amountAtomic: bigint; warnings: string[] };
 export type TransferSubmission = { signature: string; status: string };
 
@@ -90,6 +107,10 @@ export type CheckoutPreparation = {
   merchant: string;
   network: string;
   feeLamports: bigint | null;
+  /** Base58 of the account that pays the network fee. null when the API did not say (older API): the customer pays, exactly as before. */
+  feePayer: string | null;
+  /** True when the platform pays the Solana network fee (the transaction then has two signers: platform fee payer, then the customer). false when omitted. */
+  feeSponsored: boolean;
   unsignedTransactionBase64: string;
   expiresAt: string | null;
   disclosures: string[];
@@ -126,6 +147,42 @@ export function normalizeBalance(raw: unknown): WalletBalance {
   const finalizedAtomic = requireAtomic(r.finalizedAtomic);
   const spendableAtomic = requireAtomic(r.spendableAtomic);
   return { finalizedAtomic, spendableAtomic, researchCredits: spendableAtomic / 1_000_000n, stale: r.stale === true };
+}
+
+export function normalizeOrderTopUp(raw: unknown): OrderTopUp {
+  const r = asRecord(raw);
+  const orderId = requireString(r.orderId);
+  const requiredAtomic = requireAtomic(r.requiredAtomic);
+  const spendableAtomic = requireAtomic(r.spendableAtomic);
+  if (r.topUpNeeded === false) return { topUpNeeded: false, orderId, requiredAtomic, spendableAtomic };
+  if (r.topUpNeeded !== true) throw malformed();
+  const shortfallAtomic = requireAtomic(r.shortfallAtomic);
+  const topUpUsdCents = asCents(r.topUpUsdCents);
+  // A top-up that is needed must have a positive shortfall and a positive amount; anything else is not safe to show as an offer.
+  if (shortfallAtomic <= 0n || topUpUsdCents === null || topUpUsdCents <= 0) throw malformed();
+  const intentId = requireString(r.intentId);
+  const quote = asRecord(r.quote);
+  const status = asString(r.status);
+  return {
+    topUpNeeded: true,
+    orderId,
+    intentId,
+    requiredAtomic,
+    spendableAtomic,
+    shortfallAtomic,
+    topUpUsdCents,
+    quote: {
+      provider: asString(quote.provider) ?? 'moonpay',
+      sandbox: quote.sandbox === true,
+      widgetUrl: asString(quote.widgetUrl) ?? '',
+      estimatedFeeUsdCents: asCents(quote.estimatedFeeUsdCents),
+      estimatedUsdcAtomic: optionalAtomic(quote.estimatedUsdcAtomic),
+      disclosures: asStrings(quote.disclosures),
+      intentId,
+    },
+    status: status === 'PENDING' ? 'PENDING' : 'CREATED',
+    merchant: asString(r.merchant),
+  };
 }
 
 export function normalizeTransactionStatus(raw: string): WalletTransactionStatus {
@@ -231,6 +288,16 @@ export async function createOnrampQuote(email: string, usdAmountCents: number): 
   };
 }
 
+/**
+ * Asks the API whether this customer can pay this order now, and if not, for a card/bank top-up quote sized to the shortfall.
+ * Contract: POST /wallet/onramp/order-topup { orderId }. Requesting a quote moves no money.
+ */
+export async function createOrderTopUp(email: string, orderId: string): Promise<OrderTopUp> {
+  const topUp = normalizeOrderTopUp(await apiRequest('/wallet/onramp/order-topup', { method: 'POST', email, body: { orderId } }));
+  if (topUp.orderId !== orderId) throw malformed();
+  return topUp;
+}
+
 export async function mockCompleteOnramp(email: string, intentId: string): Promise<void> {
   await apiRequest(`/wallet/onramp/${encodeURIComponent(intentId)}/mock-complete`, { method: 'POST', email, body: {} });
 }
@@ -255,8 +322,9 @@ export async function submitTransfer(email: string, id: string, signedTransactio
   return { signature: requireString(r.txSignature), status: asString(r.status) ?? 'SUBMITTED' };
 }
 
-export async function prepareCheckout(email: string, orderId: string): Promise<CheckoutPreparation> {
-  const r = asRecord(await apiRequest(`/wallet/checkout/${encodeURIComponent(orderId)}/prepare`, { method: 'POST', email, body: {} }));
+/** POST /wallet/checkout/:orderId/prepare response -> CheckoutPreparation. Missing feePayer/feeSponsored mean "the customer pays" (old API). */
+export function normalizeCheckoutPreparation(raw: unknown): CheckoutPreparation {
+  const r = asRecord(raw);
   const usd = r.amountUsd;
   return {
     paymentReference: requireString(r.paymentReference),
@@ -265,10 +333,16 @@ export async function prepareCheckout(email: string, orderId: string): Promise<C
     merchant: requireString(r.merchant),
     network: asString(r.network) ?? 'unknown',
     feeLamports: optionalAtomic(r.feeLamports),
+    feePayer: asString(r.feePayer),
+    feeSponsored: r.feeSponsored === true,
     unsignedTransactionBase64: requireString(r.unsignedTransactionBase64),
     expiresAt: asString(r.expiresAt),
     disclosures: asStrings(r.disclosures),
   };
+}
+
+export async function prepareCheckout(email: string, orderId: string): Promise<CheckoutPreparation> {
+  return normalizeCheckoutPreparation(await apiRequest(`/wallet/checkout/${encodeURIComponent(orderId)}/prepare`, { method: 'POST', email, body: {} }));
 }
 
 export async function submitCheckout(email: string, orderId: string, signedTransactionBase64: string): Promise<void> {

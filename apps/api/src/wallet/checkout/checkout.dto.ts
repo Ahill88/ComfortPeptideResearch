@@ -21,7 +21,9 @@ export class PrepareCheckoutResponse {
   @ApiProperty({ description: 'Merchant treasury owner address.' }) merchant!: string;
   @ApiProperty({ example: 'solana-devnet' }) network!: string;
   @ApiProperty({ description: 'USDC mint address.' }) mint!: string;
-  @ApiProperty({ description: 'Estimated network fee in lamports (decimal string), paid by the customer wallet in SOL.', example: '5000' }) feeLamports!: string;
+  @ApiProperty({ description: 'Estimated network fee in lamports (decimal string), paid in SOL by feePayer (the customer wallet, or Helix & Field when feeSponsored).', example: '5000' }) feeLamports!: string;
+  @ApiProperty({ description: 'Base58 account paying the network fee. Equals the customer wallet address when the fee is not sponsored.' }) feePayer!: string;
+  @ApiProperty({ description: 'True when Helix & Field pays the network fee, so the customer wallet needs no SOL. The fee payer is then account index 0 of the transaction, signs only to pay the fee, and is added by the platform at submit.' }) feeSponsored!: boolean;
   @ApiProperty({ description: 'Unsigned legacy transaction (base64). The customer signs it with their own wallet.' }) unsignedTransactionBase64!: string;
   @ApiProperty({ format: 'date-time' }) expiresAt!: string;
   @ApiProperty({ type: [String] }) disclosures!: string[];

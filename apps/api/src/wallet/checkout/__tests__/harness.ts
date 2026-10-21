@@ -2,6 +2,7 @@
  * Test harness: in-memory prisma double, fake SolanaChain, and a throwaway customer Keypair that
  * simulates the customer's OWN wallet signing. Secret keys exist ONLY in test code.
  */
+import { createPrivateKey, sign as ed25519Sign } from 'node:crypto';
 import { Keypair, Transaction } from '@solana/web3.js';
 import {
   ChainUnavailableError,
@@ -12,12 +13,14 @@ import {
   type SolanaNetwork,
   type WalletFeatureFlags,
 } from '../../contracts';
+import { ChainRejectedError } from '../../chain/chain-errors';
 import { CheckoutService } from '../checkout.service';
 import { base58Encode, referenceKeyFor } from '../checkout.util';
 import { InMemoryPreparedMessageStore } from '../prepared-message-store';
 import { ReconciliationService } from '../reconciliation.service';
 import { VerificationService } from '../verification.service';
-import type { BalancePort, CheckoutConfig, FulfillmentTrigger, WalletLookupPort } from '../ports';
+import type { BalancePort, CheckoutConfig, FeePayerSigner, FulfillmentTrigger, WalletLookupPort } from '../ports';
+import { DEFAULT_FEE_SPONSOR_MAX_PER_CUSTOMER_DAY, DEFAULT_FEE_SPONSOR_MIN_LAMPORTS, type FeeSponsorshipConfig } from '../fee-sponsorship';
 import type { PrepareResult } from '../checkout.types';
 
 type Row = Record<string, any>;
@@ -47,6 +50,7 @@ function matches(row: Row, where: Row | undefined): boolean {
       if ('not' in cond) return value !== cond.not;
       if ('lt' in cond) return value < cond.lt;
       if ('gt' in cond) return value > cond.gt;
+      if ('gte' in cond) return value >= cond.gte;
       throw new Error(`unsupported operator ${JSON.stringify(Object.keys(cond))}`);
     }
     return value === cond;
@@ -196,13 +200,36 @@ export class FakeChain implements SolanaChain {
   async broadcast(serialized: Uint8Array) {
     this.check();
     if (this.broadcastError) throw this.broadcastError;
+    const tx = Transaction.from(Buffer.from(serialized));
+    // Like a real cluster: every required signature must be present and valid or the transaction is refused.
+    if (!tx.verifySignatures()) throw new ChainRejectedError('Transaction signature verification failed');
     this.broadcasts.push(serialized);
-    return base58Encode(Transaction.from(Buffer.from(serialized)).signatures[0].signature!);
+    return base58Encode(tx.signatures[0].signature!);
   }
   async getTransfer(signature: string) {
     this.check();
     if (this.transferError) throw this.transferError;
     return this.transfers.get(signature) ?? null;
+  }
+}
+
+/** Test double for the platform's fee-payer signer, backed by a throwaway test key (test code only). */
+export class TestFeePayerSigner implements FeePayerSigner {
+  readonly publicKey: string;
+  calls: Uint8Array[] = [];
+  /** When set, signMessage rejects with it (a KMS outage). */
+  failWith: Error | null = null;
+  /** When set, signMessage returns this instead of a real signature. */
+  returnInstead: Uint8Array | null = null;
+  constructor(readonly keypair: Keypair = Keypair.generate()) {
+    this.publicKey = keypair.publicKey.toBase58();
+  }
+  async signMessage(message: Uint8Array): Promise<Uint8Array> {
+    this.calls.push(Uint8Array.from(message));
+    if (this.failWith) throw this.failWith;
+    if (this.returnInstead) return this.returnInstead;
+    const pkcs8 = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(this.keypair.secretKey.slice(0, 32))]);
+    return new Uint8Array(ed25519Sign(null, Buffer.from(message), createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })));
   }
 }
 
@@ -220,7 +247,9 @@ export interface Harness {
   checkout: CheckoutService;
   verification: VerificationService;
   recon: ReconciliationService;
-  makeCheckout(): CheckoutService;
+  /** The fee-sponsorship test signer (always created; bound to `checkout` only when options.sponsorship is set). */
+  signer: TestFeePayerSigner;
+  makeCheckout(overrides?: { signer?: FeePayerSigner | null }): CheckoutService;
   spendable(): Promise<{ finalizedAtomic: bigint; spendableAtomic: bigint }>;
 }
 
@@ -236,6 +265,10 @@ export function makeHarness(
     pullSettlement?: boolean;
     /** CustomerEligibility seeded for the customer. Default APPROVED (the gate is enforced); null = no record at all. */
     eligibility?: 'APPROVED' | 'PENDING' | 'REJECTED' | null;
+    /** Turns fee sponsorship ON (true = defaults) and binds the test signer, funding the sponsor with 1 SOL. */
+    sponsorship?: boolean | Partial<FeeSponsorshipConfig>;
+    /** The customer's SOL (default 0.05 SOL). */
+    customerSol?: bigint;
   } = {},
 ): Harness {
   const prisma = new FakePrisma();
@@ -260,7 +293,9 @@ export function makeHarness(
     __seq: 0,
   });
   chain.usdc.set(customer.publicKey.toBase58(), options.usdc ?? 1_000_000_000n);
-  chain.sol.set(customer.publicKey.toBase58(), 50_000_000n);
+  chain.sol.set(customer.publicKey.toBase58(), options.customerSol ?? 50_000_000n);
+  const signer = new TestFeePayerSigner();
+  if (options.sponsorship) chain.sol.set(signer.publicKey, 1_000_000_000n);
 
   const flags: WalletFeatureFlags = {
     enableRealMoonpay: false,
@@ -276,6 +311,15 @@ export function makeHarness(
     messageReuseMs: 20_000,
     nodeEnv: 'test',
   };
+  if (options.sponsorship) {
+    const overrides = options.sponsorship === true ? {} : options.sponsorship;
+    config.feeSponsorship = {
+      enabled: true,
+      minSponsorLamports: DEFAULT_FEE_SPONSOR_MIN_LAMPORTS,
+      maxPerCustomerDay: DEFAULT_FEE_SPONSOR_MAX_PER_CUSTOMER_DAY,
+      ...overrides,
+    };
+  }
   const store = new InMemoryPreparedMessageStore();
   const fulfillmentCalls: Array<Record<string, string>> = [];
   const fulfillment: FulfillmentTrigger = { trigger: async (input) => void fulfillmentCalls.push(input) };
@@ -303,7 +347,18 @@ export function makeHarness(
   const verification = new VerificationService(prisma as any, chain, flags, fulfillment);
   // Pull-driven settlement (post-submit kick + status refresh) is OFF by default so tests that drive
   // verification by hand stay deterministic; pass { pullSettlement: true } to wire it as the Nest module does.
-  const make = () => new CheckoutService(prisma as any, chain, balances, wallets, flags, store, config, options.pullSettlement ? verification : undefined);
+  const make = (overrides: { signer?: FeePayerSigner | null } = {}) =>
+    new CheckoutService(
+      prisma as any,
+      chain,
+      balances,
+      wallets,
+      flags,
+      store,
+      config,
+      options.pullSettlement ? verification : undefined,
+      overrides.signer === null ? undefined : (overrides.signer ?? (options.sponsorship ? signer : undefined)),
+    );
   return {
     prisma,
     chain,
@@ -315,6 +370,7 @@ export function makeHarness(
     store,
     fulfillmentCalls,
     staleBalance,
+    signer,
     checkout: make(),
     verification,
     recon: new ReconciliationService(prisma as any, verification, config),
@@ -359,4 +415,11 @@ export async function prepareSignSubmit(h: Harness) {
   const signed = signAs(prepared.unsignedTransactionBase64, h.customer);
   const submitted = await h.checkout.submit(CUSTOMER_ID, ORDER_ID, signed);
   return { prepared, signed, submitted, signature: submitted.txSignature };
+}
+
+/** The customer's own wallet signing a FEE-SPONSORED transaction: only the customer's slot is filled, the fee-payer slot stays empty. */
+export function signAsCustomerOnly(unsignedBase64: string, customer: Keypair): string {
+  const tx = Transaction.from(Buffer.from(unsignedBase64, 'base64'));
+  tx.partialSign(customer);
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
 }

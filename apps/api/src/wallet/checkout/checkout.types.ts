@@ -8,8 +8,15 @@ export interface PrepareResult {
   merchant: string;
   network: string;
   mint: string;
-  /** Estimated network fee in lamports (paid by the customer wallet in SOL), as a decimal string. */
+  /**
+   * Estimated network fee in lamports, as a decimal string. Paid in SOL by `feePayer`: the customer's own wallet
+   * normally, or Helix & Field when `feeSponsored` (then it costs the customer nothing).
+   */
   feeLamports: string;
+  /** Base58 account that pays the network fee. Equals the customer's wallet address when not sponsored. */
+  feePayer: string;
+  /** True when the platform pays the network fee, so the customer's wallet needs no SOL. */
+  feeSponsored: boolean;
   /** Unsigned legacy transaction. The customer signs it with their own wallet. */
   unsignedTransactionBase64: string;
   expiresAt: string;

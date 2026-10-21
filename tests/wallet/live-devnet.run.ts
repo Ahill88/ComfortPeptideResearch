@@ -9,7 +9,11 @@
  *   TEST_DATABASE_URL=postgresql://helix@127.0.0.1:54329/helix_field?schema=public \
  *   pnpm --dir apps/api exec ts-node --project tsconfig.json --transpile-only ../../tests/wallet/live-devnet.run.ts
  *
- * The wallet must hold devnet SOL (fees) and devnet USDC (mint 4zMMC9sr...). Nothing is truncated: all rows created
+ * Optional: DEVNET_SPONSOR_KEYPAIR_FILE=<devnet key funded with SOL> turns on platform-paid fees (FEE_SPONSORSHIP=true) and
+ * binds a test-only FeePayerSigner for that key, so a customer wallet holding ZERO SOL can pay. Withdrawals stay
+ * customer-paid and are skipped when the customer has no SOL.
+ *
+ * The wallet must hold devnet SOL (fees, unless sponsored) and devnet USDC (mint 4zMMC9sr...). Nothing is truncated: all rows created
  * here carry a unique email. Refuses non-devnet RPC URLs and non-local databases. The key is read from the file and is
  * never printed, logged, or sent anywhere: only signatures leave this process.
  */
@@ -38,9 +42,12 @@ process.env.WALLET_CHAIN_MODE = 'devnet';
 process.env.SOLANA_NETWORK = 'solana-devnet';
 process.env.SOLANA_RPC_URL = rpcUrl;
 process.env.SOLANA_USDC_TREASURY = treasury;
+const sponsorFile = process.env.DEVNET_SPONSOR_KEYPAIR_FILE;
+if (sponsorFile) process.env.FEE_SPONSORSHIP = 'true';
 
 const MINT = new PublicKey('4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU');
 const customer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(keypairFile, 'utf8')) as number[]));
+const sponsor = sponsorFile ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(sponsorFile, 'utf8')) as number[])) : null;
 const connection = new Connection(rpcUrl, 'finalized');
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const log = (...parts: unknown[]) => console.log(new Date().toISOString().slice(11, 19), ...parts);
@@ -75,8 +82,8 @@ async function until<T>(what: string, ms: number, fn: () => Promise<T | null>): 
 }
 function sign(unsignedBase64: string): string {
   const tx = Transaction.from(Buffer.from(unsignedBase64, 'base64'));
-  tx.partialSign(customer);
-  return tx.serialize().toString('base64');
+  tx.partialSign(customer); // only the customer's own slot; when fees are sponsored the platform fills the fee-payer slot at submit
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
 }
 function walletSigner() {
   const { createPrivateKey, sign: edSign } = require('node:crypto') as typeof import('node:crypto');
@@ -107,11 +114,13 @@ async function main() {
   log('customer wallet', customer.publicKey.toBase58());
   log('treasury', treasury, 'treasury USDC account', treasuryAta.toBase58());
 
-  const startSol = await step('preflight: wallet has devnet SOL for fees', async () => {
+  const startSol = await step(sponsor ? 'preflight: customer SOL balance recorded (sponsored: none required)' : 'preflight: wallet has devnet SOL for fees', async () => {
     const lamports = await connection.getBalance(customer.publicKey, 'finalized');
-    assert.ok(lamports >= 10_000_000, `need >= 0.01 devnet SOL, have ${lamports / 1e9}`);
+    if (!sponsor) assert.ok(lamports >= 10_000_000, `need >= 0.01 devnet SOL, have ${lamports / 1e9}`);
     return lamports;
   });
+  const sponsorStart = sponsor ? await connection.getBalance(sponsor.publicKey, 'finalized') : 0;
+  if (sponsor) log('   customer SOL', startSol, 'lamports; sponsor', sponsor.publicKey.toBase58(), 'SOL', sponsorStart / 1e9);
   const startUsdc = await step('preflight: wallet has devnet USDC', async () => {
     const amount = await usdcOf(customer.publicKey);
     assert.ok(amount >= 2_000_000n, `need >= 2 USDC, have ${Number(amount) / 1e6}`);
@@ -120,6 +129,7 @@ async function main() {
 
   await step('preflight: treasury USDC account exists (creating it, paid by the test wallet, if not)', async () => {
     if (await connection.getAccountInfo(treasuryAta, 'finalized')) return;
+    assert.ok(startSol > 5_000_000, 'the treasury token account does not exist and the customer has no SOL to create it: create it first');
     const ix = spl.createAssociatedTokenAccountIdempotentInstruction(customer.publicKey, treasuryAta, treasuryKey, MINT);
     const signature = await sendAndConfirmTransaction(connection, new Transaction().add(ix), [customer], { commitment: 'finalized' });
     log('   created treasury token account', signature);
@@ -131,8 +141,21 @@ async function main() {
   @Global()
   @Module({ providers: [{ provide: PrismaService, useValue: prisma }], exports: [PrismaService] })
   class RealPrismaModule {}
+  const { FEE_PAYER_SIGNER } = await import('../../apps/api/src/wallet/checkout/ports');
+  // Test-only signer for the sponsor key, bound the way a production KMS signer would be (listed AFTER the default ports).
+  const feePayerSigner = sponsor
+    ? {
+        publicKey: sponsor.publicKey.toBase58(),
+        async signMessage(message: Uint8Array) {
+          const { createPrivateKey, sign: edSign } = require('node:crypto') as typeof import('node:crypto');
+          const pkcs8 = Buffer.concat([Buffer.from('302e020100300506032b657004220420', 'hex'), Buffer.from(sponsor.secretKey.slice(0, 32))]);
+          return new Uint8Array(edSign(null, Buffer.from(message), createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })));
+        },
+      }
+    : null;
+  const providers = feePayerSigner ? [...checkoutPortProviders, { provide: FEE_PAYER_SIGNER, useValue: feePayerSigner }] : checkoutPortProviders;
   const moduleRef = await Test.createTestingModule({
-    imports: [RealPrismaModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers: checkoutPortProviders })],
+    imports: [RealPrismaModule, WalletModule, OrdersModule, CheckoutModule.register({ imports: [WalletModule], providers })],
   }).compile();
   const app = moduleRef.createNestApplication({ logger: ['error', 'warn'] });
   app.setGlobalPrefix('v1');
@@ -167,9 +190,12 @@ async function main() {
       const api = await client.fetchBalance(email);
       assert.equal(api.stale, false, 'balance must not be stale');
       assert.equal(api.finalizedAtomic, startUsdc);
-      assert.equal(api.spendableAtomic, startUsdc);
+      // Spendable = finalized minus active reservations (e.g. an earlier prepared-but-unsubmitted order that has not expired yet).
+      assert.ok(api.spendableAtomic <= api.finalizedAtomic && api.spendableAtomic >= 1_250_000n, `unexpected spendable ${api.spendableAtomic}`);
       return api;
     });
+    const reserved = balance.finalizedAtomic - balance.spendableAtomic;
+    if (reserved > 0n) log('   note: an earlier unexpired reservation holds', reserved, 'atomic');
     log('   API says finalized', balance.finalizedAtomic, 'spendable', balance.spendableAtomic, 'credits', balance.researchCredits);
 
     // ---------------- purchase ($1.25 = 1,250,000 atomic USDC) ----------------
@@ -191,6 +217,10 @@ async function main() {
       assert.equal(p.amountAtomic, priceAtomic);
       assert.equal(p.merchant, treasury);
       assert.equal(p.network, 'solana-devnet');
+      if (sponsor) {
+        assert.equal(p.feeSponsored, true, 'the platform must be paying the fee');
+        assert.equal(p.feePayer, sponsor.publicKey.toBase58());
+      }
       return p;
     });
     await step('checkout submit rejects an unsigned transaction', async () => {
@@ -221,12 +251,28 @@ async function main() {
       assert.equal(wallet, startUsdc - priceAtomic);
       assert.equal((await usdcOf(treasuryKey)) - treasuryBefore, priceAtomic);
     });
+    if (sponsor) {
+      await step('on chain: the sponsor is the fee payer, two signatures, customer SOL untouched, sponsor SOL paid the fee', async () => {
+        const parsed = await until('purchase transaction', 60_000, async () => connection.getParsedTransaction(purchaseTx.txSignature!, { maxSupportedTransactionVersion: 0, commitment: 'finalized' }));
+        const keys = parsed.transaction.message.accountKeys;
+        assert.equal(keys[0].pubkey.toBase58(), sponsor.publicKey.toBase58(), 'account 0 (fee payer) must be the sponsor');
+        assert.equal(keys[0].signer, true);
+        assert.equal(parsed.transaction.signatures.length, 2);
+        assert.equal(parsed.meta?.err, null);
+        const instructionKeys = parsed.transaction.message.instructions.flatMap((i) => ('accounts' in i ? i.accounts : []).map((a) => a.toBase58()));
+        assert.ok(!instructionKeys.includes(sponsor.publicKey.toBase58()), 'the sponsor must appear in no instruction');
+        assert.equal(await connection.getBalance(customer.publicKey, 'finalized'), startSol, 'customer SOL must be unchanged');
+        const spent = sponsorStart - (await connection.getBalance(sponsor.publicKey, 'finalized'));
+        log('   sponsor paid', spent, 'lamports in fees');
+        assert.ok(spent > 0 && spent <= 20_000, `unexpected sponsor spend ${spent}`);
+      });
+    }
     await step('API balance falls by exactly the price (no separate credit deduction)', async () => {
       const after = await until('API balance', 60_000, async () => {
         const api = await client.fetchBalance(email);
         return api.finalizedAtomic === startUsdc - priceAtomic ? api : null;
       });
-      assert.equal(after.spendableAtomic, startUsdc - priceAtomic);
+      assert.equal(after.spendableAtomic, startUsdc - priceAtomic - reserved);
     });
     await step('resubmitting the same signed payload after settlement never pays twice (idempotent or rejected)', async () => {
       await client.submitCheckout(email, order.id, sign(prepared.unsignedTransactionBase64)).catch(() => undefined);
@@ -235,6 +281,10 @@ async function main() {
       assert.equal(await prisma.cryptoTransaction.count({ where: { orderId: order.id, txSignature: { not: null } } }), 1, 'exactly one broadcast row');
     });
 
+    if (startSol < 10_000_000) {
+      log('SKIP external transfer steps: withdrawals are customer-paid and the customer has', startSol, 'lamports of SOL');
+      return;
+    }
     // ---------------- external transfer (0.25 USDC to a fresh address) ----------------
     const destination = Keypair.generate().publicKey;
     const sendAtomic = 250_000n;
@@ -264,7 +314,7 @@ async function main() {
         const b = await client.fetchBalance(email);
         return b.finalizedAtomic === expected ? b : null;
       });
-      assert.equal(api.spendableAtomic, expected);
+      assert.equal(api.spendableAtomic, expected - reserved);
       assert.equal(await usdcOf(customer.publicKey), expected);
     });
     const endSol = await connection.getBalance(customer.publicKey, 'finalized');

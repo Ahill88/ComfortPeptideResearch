@@ -4,6 +4,9 @@
  * depends on `../contracts` types and the shapes declared here.
  */
 import type { SolanaChain, SpendableBalance, WalletFeatureFlags } from '../contracts';
+import { loadFeeSponsorshipConfig, type FeeSponsorshipConfig } from './fee-sponsorship';
+
+export { FEE_PAYER_SIGNER, type FeePayerSigner } from './fee-payer-signer.port';
 
 /** Provide: a `SolanaChain` implementation (devnet RPC or sandbox). */
 export const CHAIN_PORT = Symbol('CHECKOUT_CHAIN_PORT');
@@ -46,14 +49,19 @@ export interface PreparedMessage {
   reference: string;
   orderId: string;
   customerId: string;
-  /** Customer wallet (fee payer and sole required signer). */
+  /**
+   * Customer wallet: the USDC token authority and a required signer. It is also the fee payer UNLESS the payment is
+   * fee-sponsored, in which case the fee payer is account index 0 of `messageBytes` (the checkout service derives
+   * "sponsored" from the compiled message itself, never from a separate flag, so a store that does not round-trip
+   * extra fields, such as the Redis codec, cannot lose or forge the decision).
+   */
   payer: string;
   merchant: string;
   mint: string;
   amountAtomic: bigint;
   referenceKey: string;
   feeLamports: bigint;
-  /** Exact compiled legacy message bytes the customer must sign. */
+  /** Exact compiled legacy message bytes the customer must sign (and, when sponsored, the sponsor signs server-side). */
   messageBytes: Uint8Array;
   createdAtMs: number;
 }
@@ -78,6 +86,11 @@ export interface CheckoutConfig {
   reservationTtlMs: number;
   /** A prepared message older than this is rebuilt (fresh blockhash) on re-prepare. */
   messageReuseMs: number;
+  /**
+   * Network-fee sponsorship policy (FEE_SPONSORSHIP / FEE_SPONSOR_*). OPTIONAL: absent means disabled, i.e. the
+   * customer pays the fee in SOL exactly as before. loadCheckoutConfig always sets it (strictly parsed).
+   */
+  feeSponsorship?: FeeSponsorshipConfig;
   /** Informational only. NOT a gate: nothing may compare this to 'production'; use config/runtime.ts allowlist helpers. */
   nodeEnv: string | undefined;
 }
@@ -88,6 +101,8 @@ export function loadCheckoutConfig(env: NodeJS.ProcessEnv = process.env): Checko
     mainnetUsdcMint: env.SOLANA_USDC_MAINNET_MINT?.trim() || undefined,
     reservationTtlMs: 15 * 60_000,
     messageReuseMs: 20_000,
+    // Throws on a malformed FEE_SPONSORSHIP / FEE_SPONSOR_* value: the API refuses to start.
+    feeSponsorship: loadFeeSponsorshipConfig(env),
     nodeEnv: env.NODE_ENV,
   };
 }

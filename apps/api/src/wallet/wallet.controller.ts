@@ -3,8 +3,9 @@ import { ApiHeader, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { CreditsService } from './credits.service';
 import { CustomerEmail } from './customer-identity';
 import { OnRampService } from './onramp/onramp.service';
+import { OrderTopUpService } from './onramp/order-topup.service';
 import { TransfersService } from './transfers/transfers.service';
-import { AssociateWalletDto, CreateOnRampDto, LinkChallengeDto, PrepareTransferDto, SubmitTransferDto } from './wallet.dto';
+import { AssociateWalletDto, CreateOnRampDto, LinkChallengeDto, OrderTopUpDto, PrepareTransferDto, SubmitTransferDto } from './wallet.dto';
 import { BigIntSerializerInterceptor, ChainErrorFilter, NoSecretMaterialGuard } from './wallet.http';
 import { WalletService } from './wallet.service';
 
@@ -25,6 +26,7 @@ export class WalletController {
     private readonly wallets: WalletService,
     private readonly credits: CreditsService,
     private readonly onRamp: OnRampService,
+    private readonly topUps: OrderTopUpService,
     private readonly transfers: TransfersService,
   ) {}
 
@@ -72,6 +74,22 @@ export class WalletController {
   async createOnRamp(@CustomerEmail() email: string, @Body() body: CreateOnRampDto, @Req() req: { ip?: string }) {
     const customer = await this.wallets.resolveCustomer(email);
     return this.onRamp.createIntent(customer.id, { intendedUsdCents: body.amountUsdCents, customerIp: req.ip });
+  }
+
+  @Post('onramp/order-topup')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Checkout shortfall. Computes how much spendable USDC your pending order is missing and, if short, opens an on-ramp intent for at least that amount (whole US dollars, plus an operator-set fee buffer). Funds land in your own linked wallet; nothing is paid or credited here, and balances come only from the chain. Amounts are decimal strings of USDC base units.',
+  })
+  @ApiResponse({ status: 400, description: 'Needed amount exceeds the maximum single purchase.' })
+  @ApiResponse({ status: 403, description: 'Eligibility not approved.' })
+  @ApiResponse({ status: 404, description: 'Order not found (also for orders owned by someone else).' })
+  @ApiResponse({ status: 409, description: 'Order is not awaiting payment, payment already in flight, or no wallet linked.' })
+  @ApiResponse({ status: 503, description: 'Balance could not be read from the chain; nothing was created.' })
+  async orderTopUp(@CustomerEmail() email: string, @Body() body: OrderTopUpDto, @Req() req: { ip?: string }) {
+    const customer = await this.wallets.resolveCustomer(email);
+    return this.topUps.topUpForOrder(customer.id, body.orderId, req.ip);
   }
 
   @Post('onramp/:id/mock-complete')

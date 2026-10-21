@@ -4,6 +4,7 @@ import { CreditsService } from './credits.service';
 import { loadFeatureFlags, WalletFeatureFlags } from './contracts';
 import { MoonPayOnRampProvider } from './onramp/moonpay-onramp.provider';
 import { OnRampService } from './onramp/onramp.service';
+import { OrderTopUpService } from './onramp/order-topup.service';
 import { AllowAllComplianceScreen } from './transfers/compliance-screen';
 import { createPreparedTransactionStore } from './stores/prepared-store.factory';
 import { TransfersService } from './transfers/transfers.service';
@@ -47,8 +48,9 @@ export { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG, ONRAMP_PROVI
     WalletService,
     CreditsService,
     OnRampService,
+    OrderTopUpService,
     TransfersService,
   ],
-  exports: [WalletService, CreditsService, SOLANA_CHAIN, WALLET_FEATURE_FLAGS],
+  exports: [WalletService, CreditsService, SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG],
 })
 export class WalletModule {}

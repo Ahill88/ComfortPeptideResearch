@@ -1,10 +1,27 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { PrismaService } from '../prisma.service';
-import { BALANCE_PORT, CHAIN_PORT, FULFILLMENT_PORT, WALLET_FLAGS, WALLET_LOOKUP_PORT } from './checkout/ports';
-import type { BalancePort, FulfillmentTrigger, WalletLookupPort } from './checkout/ports';
+import { SANDBOX_SPONSOR_LAMPORTS, SandboxFeePayerSigner } from './chain/sandbox-fee-payer-signer';
+import { SandboxSolanaChain } from './chain/sandbox-solana-chain';
+import { BALANCE_PORT, CHAIN_PORT, FEE_PAYER_SIGNER, FULFILLMENT_PORT, WALLET_FLAGS, WALLET_LOOKUP_PORT } from './checkout/ports';
+import type { BalancePort, FeePayerSigner, FulfillmentTrigger, WalletLookupPort } from './checkout/ports';
 import { ReconciliationService } from './checkout/reconciliation.service';
 import { CreditsService } from './credits.service';
-import { SOLANA_CHAIN, WALLET_FEATURE_FLAGS } from './wallet.tokens';
+import { isSandboxAllowed, type WalletRuntimeConfig } from './wallet.config';
+import { SOLANA_CHAIN, WALLET_FEATURE_FLAGS, WALLET_RUNTIME_CONFIG } from './wallet.tokens';
+
+/**
+ * FEE_PAYER_SIGNER for the SANDBOX chain only. Returns undefined (sponsorship unavailable) for every real chain:
+ * production/devnet deployments bind their own KMS/HSM-backed signer under the FEE_PAYER_SIGNER token by listing
+ * their provider AFTER `...checkoutPortProviders` (Nest keeps the last provider registered for a token), e.g.
+ *   CheckoutModule.register({ imports: [WalletModule], providers: [...checkoutPortProviders, { provide: FEE_PAYER_SIGNER, useClass: KmsFeePayerSigner }] })
+ * The sandbox signer's account is credited with sandbox SOL so it can pay (fake) fees.
+ */
+export function createSandboxFeePayerSigner(chain: unknown, config: WalletRuntimeConfig): FeePayerSigner | undefined {
+  if (!(chain instanceof SandboxSolanaChain) || config.chainMode !== 'sandbox' || !isSandboxAllowed(config)) return undefined;
+  const signer = new SandboxFeePayerSigner(config);
+  chain.setSolBalance(signer.publicKey, SANDBOX_SPONSOR_LAMPORTS);
+  return signer;
+}
 
 /**
  * Providers that satisfy the checkout module's ports using the wallet module.
@@ -13,6 +30,11 @@ import { SOLANA_CHAIN, WALLET_FEATURE_FLAGS } from './wallet.tokens';
 export const checkoutPortProviders = [
   { provide: CHAIN_PORT, useExisting: SOLANA_CHAIN },
   { provide: WALLET_FLAGS, useExisting: WALLET_FEATURE_FLAGS },
+  {
+    provide: FEE_PAYER_SIGNER,
+    inject: [SOLANA_CHAIN, WALLET_RUNTIME_CONFIG],
+    useFactory: (chain: unknown, config: WalletRuntimeConfig): FeePayerSigner | undefined => createSandboxFeePayerSigner(chain, config),
+  },
   {
     provide: BALANCE_PORT,
     inject: [CreditsService],

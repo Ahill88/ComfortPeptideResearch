@@ -52,6 +52,16 @@ export class ReconciliationService {
           // The blockhash of a never-landed transaction expires within ~2 minutes; after the full
           // reservation TTL it can no longer land, so release it.
           if (await this.expireNeverLanded(row)) summary.expired++;
+        } else if (
+          result.outcome === 'PENDING' &&
+          result.reason === 'not_submitted' &&
+          row.createdAt.getTime() < now.getTime() - this.config.reservationTtlMs
+        ) {
+          // SUBMITTED but with NO transaction id. Only a fee-sponsored claim can be in this state (its id is the fee
+          // payer's signature, persisted before broadcast), so nothing was ever sent: the process died, or the signer
+          // hung, between the claim and the broadcast. Nothing can land later, so release it. (A live submit racing this
+          // loses its compare-and-set on the signature write and aborts without broadcasting.)
+          if (await this.expireNeverLanded(row, 'claimed but never broadcast (fee-payer signing did not complete)')) summary.expired++;
         }
       } catch (error) {
         if (error instanceof ServiceUnavailableException) summary.unavailable++;
@@ -118,11 +128,14 @@ export class ReconciliationService {
     });
   }
 
-  private async expireNeverLanded(row: { id: string; customerId: string; orderId: string | null; reference: string }): Promise<boolean> {
+  private async expireNeverLanded(
+    row: { id: string; customerId: string; orderId: string | null; reference: string; txSignature?: string | null },
+    reason = 'transaction never landed before expiry',
+  ): Promise<boolean> {
     return this.prisma.$transaction(async (tx) => {
       const done = await tx.cryptoTransaction.updateMany({
-        where: { id: row.id, status: { in: ['SUBMITTED', 'CONFIRMED'] } },
-        data: { status: 'EXPIRED', failureReason: 'transaction never landed before expiry' },
+        where: { id: row.id, status: { in: ['SUBMITTED', 'CONFIRMED'] }, ...(row.txSignature === null ? { txSignature: null } : {}) },
+        data: { status: 'EXPIRED', failureReason: reason },
       });
       if (done.count !== 1) return false;
       if (row.orderId) await tx.creditReservation.updateMany({ where: { orderId: row.orderId, status: 'ACTIVE' }, data: { status: 'EXPIRED' } });

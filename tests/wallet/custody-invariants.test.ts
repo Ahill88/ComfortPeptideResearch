@@ -26,9 +26,66 @@ test('custody: apps/api/src (non-test) never generates, loads, holds or uses pri
   assert.ok(files.length > 0, 'scan covered zero files; apps/api/src path is wrong');
   const hits = scanRules(files, CUSTODY_RULES, {
     // The ONLY allowance: MOONPAY_SECRET_KEY on a line inside a moonpay provider file (URL HMAC).
-    allow: (hit) => (hit.rule.startsWith('secretKey') && isMoonpayLine(hit)) || isImportFreeDenylist(hit),
+    allow: (hit) => (hit.rule.startsWith('secretKey') && isMoonpayLine(hit)) || isImportFreeDenylist(hit) || isSponsorSignerAllowance(hit),
   });
   assert.equal(hits.length, 0, `custody violations (platform must never touch private keys):\n${formatHits(hits)}`);
+});
+
+/*
+ * NARROW EXTENSION for network-fee sponsorship (owner-approved product decision; see docs/wallet/custody-model.md).
+ * The platform now signs ONE thing: the network-fee payer's signature, through the FeePayerSigner port. Exactly two
+ * hits are tolerated, each pinned to one file and one statement, and the tests after this block pin what those two
+ * files must look like so the allowance cannot quietly widen:
+ *   1. chain/sandbox-fee-payer-signer.ts: `pair.privateKey` (the sandbox-only in-memory key; rule 'privateKey identifier').
+ *   2. checkout/fee-payer-signer.port.ts: `signer.signMessage(message)` (the single call into the bound KMS/HSM signer).
+ * Nothing else (no Keypair, no secretKey, no .sign( / .partialSign( / nacl) is allowed anywhere else.
+ *
+ * WHY THE PORT'S SINGLE CALL SITE IS SAFE: a fee-payer signature can authorize only the payment of the network fee, and
+ * nothing else, because CheckoutService asserts (assertSponsorOnlyPaysFee on the compiled message, before the claim and
+ * again immediately before asking for the signature) that the fee payer is account index 0 and appears in NO instruction
+ * account list, nor as a program. A signature by an account that no instruction references cannot move USDC or SOL out of
+ * any account; the customer's wallet remains the USDC authority and must sign itself. The static test below pins that
+ * the service keeps making that assertion in front of the signing call.
+ */
+const SANDBOX_SIGNER_FILE = 'apps/api/src/wallet/chain/sandbox-fee-payer-signer.ts';
+const FEE_PAYER_PORT_FILE = 'apps/api/src/wallet/checkout/fee-payer-signer.port.ts';
+function isSponsorSignerAllowance(hit: { file: string; rule: string; text: string }): boolean {
+  const file = rel(absoluteHitPath(hit.file));
+  if (file === SANDBOX_SIGNER_FILE) return hit.rule.startsWith('privateKey') && /^this\.#key\s*=\s*pair\.privateKey;$/.test(hit.text);
+  if (file === FEE_PAYER_PORT_FILE) return hit.rule.startsWith('transaction/message signing') && /^signature\s*=\s*await signer\.signMessage\(message\);$/.test(hit.text);
+  return false;
+}
+
+test('custody: the fee-payer signing allowance is confined to the port helper and the sandbox-only in-memory signer', () => {
+  const files = API_FILES();
+  // 1. Only the sandbox signer generates a key, and only wallet.wiring.ts (a non-test file) constructs it.
+  const generating = files.filter((f) => /\bgenerateKeyPair(?:Sync)?\s*\(/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(generating, [SANDBOX_SIGNER_FILE], `only the sandbox signer may generate a key; found: ${generating.join(', ')}`);
+  const constructing = files.filter((f) => /\bnew\s+SandboxFeePayerSigner\b/.test(stripComments(read(f)))).map(rel).sort();
+  assert.deepEqual(constructing, ['apps/api/src/wallet/wallet.wiring.ts'], 'only wallet.wiring.ts may construct the sandbox signer');
+  // 2. The only implementation of the port in this repository is the sandbox one; the only call into a signer is the port helper.
+  const implementing = files.filter((f) => /\bimplements\s+FeePayerSigner\b/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(implementing, [SANDBOX_SIGNER_FILE], `no production FeePayerSigner implementation may ship in apps/api/src; found: ${implementing.join(', ')}`);
+  const calls = files.filter((f) => /\.\s*signMessage\s*\(/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(calls, [FEE_PAYER_PORT_FILE], `signMessage may be called only by the port helper; found: ${calls.join(', ')}`);
+  // 3. The sandbox signer must keep its guards and must not load, persist or expose key material.
+  // The only environment access tolerated is the injectable default `env: EnvLike = process.env` fed to the runtime gate.
+  const src = stripComments(read(path.join(ROOT, SANDBOX_SIGNER_FILE))).replace('env: EnvLike = process.env', 'env: EnvLike');
+  assert.match(src, /isSandboxAllowed\s*\(/, 'sandbox signer must be gated by isSandboxAllowed');
+  assert.match(src, /isNonProductionRuntime\s*\(/, 'sandbox signer must be gated by isNonProductionRuntime');
+  assert.match(src, /throw new Error\(/, 'sandbox signer must refuse to construct outside development/test');
+  assert.match(src, /readonly #key\b/, 'the key must live in a true private field');
+  assert.doesNotMatch(src, /\bfs\b|readFile|writeFile|process\.env|\benv\s*\.|JSON\.stringify|console\.|logger|export\s*\{|toString\s*\(\s*['"`]base58|secret/i, 'sandbox signer must not read/write files or env keys, log, serialize or expose key material');
+  assert.equal((src.match(/^export\b/gm) ?? []).length, 2, 'sandbox signer file exports only the class and the sandbox lamports constant');
+  // 3b. The service asserts "fee payer is in no instruction" before it may ask for a fee-payer signature.
+  const service = stripComments(read(path.join(ROOT, 'apps/api/src/wallet/checkout/checkout.service.ts')));
+  const signing = service.slice(service.indexOf('private async signAsFeePayer'));
+  assert.ok(signing.indexOf('assertSponsorOnlyPaysFee(') > 0 && signing.indexOf('assertSponsorOnlyPaysFee(') < signing.indexOf('requestFeePayerSignature('), 'assertSponsorOnlyPaysFee must run before requestFeePayerSignature');
+  const requesting = files.filter((f) => /\brequestFeePayerSignature\s*\(/.test(stripComments(read(f)))).map(rel).sort();
+  assert.deepEqual(requesting, ['apps/api/src/wallet/checkout/checkout.service.ts', FEE_PAYER_PORT_FILE].sort(), 'only the checkout service may request a fee-payer signature');
+  // 4. The port file holds no key material and no implementation, and the platform never types the word "secret" there.
+  const port = stripComments(read(path.join(ROOT, FEE_PAYER_PORT_FILE)));
+  assert.doesNotMatch(port, /secret|generateKeyPair|Keypair|createPrivateKey|process\.env|\bfs\b/i, 'the port must hold no key material');
 });
 
 // MoonPay's URL-signing secret may be named only in the provider and in the env config loader.

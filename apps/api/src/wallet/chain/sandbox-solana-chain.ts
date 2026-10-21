@@ -199,13 +199,21 @@ export class SandboxSolanaChain implements WalletChain {
       }
     }
     if (!transfer) throw new ChainRejectedError('No token transfer found in transaction');
-    if (transfer.sourceOwner !== feePayer) throw new ChainRejectedError('Fee payer must be the transfer authority');
     if (transfer.amount <= 0n) throw new ChainRejectedError('Amount must be positive');
     if ((this.usdc.get(transfer.sourceOwner) ?? 0n) < transfer.amount) throw new ChainRejectedError('Insufficient funds');
-    if (this.options.strictSolFees) {
+    // Fee-sponsored transaction: the fee payer is NOT the token authority. The authority (the customer) is still a
+    // required signer whose signature was verified above (verifySignatures covers every required signer), so the
+    // sponsor can neither authorize nor redirect the transfer. The network fee (5000 lamports per signature) is
+    // debited from the FEE PAYER's SOL; the customer needs none. Customer-paid transactions keep the old model.
+    const sponsored = transfer.sourceOwner !== feePayer;
+    const feeLamports = BASE_FEE_LAMPORTS_PER_SIGNATURE * BigInt(tx.signatures.length);
+    if (sponsored) {
+      if ((this.sol.get(feePayer) ?? this.defaultSol()) < feeLamports) throw new ChainRejectedError('Insufficient SOL for fees');
+    } else if (this.options.strictSolFees) {
       const need = BASE_FEE_LAMPORTS_PER_SIGNATURE + (createsAccount ? TOKEN_ACCOUNT_RENT_LAMPORTS : 0n);
       if ((this.sol.get(feePayer) ?? this.defaultSol()) < need) throw new ChainRejectedError('Insufficient SOL for fees');
     }
+    if (sponsored) this.sol.set(feePayer, (this.sol.get(feePayer) ?? this.defaultSol()) - feeLamports);
 
     for (const [ata, owner] of learned) this.ataOwners.set(ata, owner);
     const entry: SandboxTransfer = {

@@ -13,8 +13,8 @@
  * ======================================================================================
  */
 import { ed25519 } from '@noble/curves/ed25519';
-import { Keypair, VersionedTransaction } from '@solana/web3.js';
-import { base64ToBytes, bytesToBase64 } from './tx';
+import { Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
+import { base64ToBytes, bytesToBase64, type SigningOptions } from './tx';
 
 export const SANDBOX_DISCLOSURE = 'Sandbox wallet: Solana devnet only, not for real funds. In this sandbox the key is stored in this browser. Clearing browser data without exporting the key loses access.';
 
@@ -26,8 +26,13 @@ export interface WalletSigner {
   readonly providerId: WalletProviderId;
   /** Base58 public address. Safe to share and to send to the API. */
   readonly address: string;
-  /** Signs locally. Input and output are base64 serialized transactions. */
-  signTransaction(unsignedBase64: string): Promise<string>;
+  /**
+   * Signs locally. Input and output are base64 serialized transactions.
+   * Default: the transaction must have this wallet as its only signer (and fee payer).
+   * With `sponsoredFeePayer` (platform-paid network fee): the transaction must have exactly two signers, [that fee payer, this wallet];
+   * only this wallet's slot is filled, the fee payer's signature slot is left empty for the server.
+   */
+  signTransaction(unsignedBase64: string, options?: SigningOptions): Promise<string>;
   /**
    * Proves control of this wallet for account linking: signs a UTF-8 message locally and returns the base64 of the
    * 64-byte detached ed25519 signature. Only the signature leaves the browser, never the key.
@@ -87,11 +92,23 @@ export class SandboxBrowserSigner implements WalletSigner {
     window.localStorage.removeItem(sandboxStorageKey(email));
   }
 
-  async signTransaction(unsignedBase64: string): Promise<string> {
+  async signTransaction(unsignedBase64: string, options?: SigningOptions): Promise<string> {
     const tx = VersionedTransaction.deserialize(base64ToBytes(unsignedBase64));
-    const required = tx.message.staticAccountKeys.slice(0, tx.message.header.numRequiredSignatures);
-    // The API only ever builds legacy transactions whose single required signer (and fee payer) is the customer.
-    if (tx.version !== 'legacy' || required.length !== 1 || !required[0].equals(this.#keypair.publicKey)) throw new Error('This transaction must require exactly one signature, from this wallet.');
+    const { numRequiredSignatures, numReadonlySignedAccounts } = tx.message.header;
+    const required = tx.message.staticAccountKeys.slice(0, numRequiredSignatures);
+    const own = this.#keypair.publicKey;
+    const sponsor = options?.sponsoredFeePayer;
+    if (sponsor === undefined) {
+      // Customer-paid fee: a legacy transaction whose single required signer (and fee payer) is the customer.
+      if (tx.version !== 'legacy' || required.length !== 1 || !required[0].equals(own)) throw new Error('This transaction must require exactly one signature, from this wallet.');
+    } else {
+      // Platform-paid fee: exactly [platform fee payer, this wallet]. The fee payer must be the key the caller verified, never this wallet.
+      const sponsorMatches = (() => { try { return required[0]?.toBase58() === new PublicKey(sponsor).toBase58(); } catch { return false; } })();
+      if (tx.version !== 'legacy' || required.length !== 2 || numReadonlySignedAccounts > 1 || !sponsorMatches || required[0].equals(own) || !required[1].equals(own)) {
+        throw new Error('This transaction must require exactly two signatures: the platform fee payer, then this wallet.');
+      }
+    }
+    // sign() fills only this keypair's slot; a fee payer's slot stays empty (the server adds that signature at submit).
     tx.sign([this.#keypair]);
     return bytesToBase64(tx.serialize());
   }

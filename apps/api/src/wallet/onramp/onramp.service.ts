@@ -21,30 +21,18 @@ export class OnRampService {
   /**
    * Creates an on-ramp intent. The destination is ALWAYS the customer's own linked wallet
    * (loaded from CustomerWallet); no request field can choose it, and the treasury is refused.
+   * `orderId` is an informational link set only by the order top-up flow; it never credits or pays anything.
    */
-  async createIntent(customerId: string, input: { intendedUsdCents: number; customerIp?: string }): Promise<{ intentId: string; status: string; quote: OnRampQuote }> {
+  async createIntent(
+    customerId: string,
+    input: { intendedUsdCents: number; customerIp?: string; orderId?: string },
+  ): Promise<{ intentId: string; status: string; quote: OnRampQuote }> {
     if (!Number.isSafeInteger(input.intendedUsdCents) || input.intendedUsdCents <= 0) {
       throw new BadRequestException('amountUsdCents must be a positive integer');
     }
-    const wallet = await this.prisma.customerWallet.findUnique({ where: { customerId } });
-    if (!wallet) throw new ConflictException('Link a wallet before buying credits');
-    if (this.config.treasuryAddress && wallet.address === this.config.treasuryAddress) {
-      throw new ConflictException('Wallet address is reserved and cannot receive on-ramp funds');
-    }
+    const wallet = await this.requireLinkedWallet(customerId);
     const intentId = randomUUID();
-    const quote = await this.provider.createQuote({
-      customerId,
-      destinationAddress: wallet.address,
-      intendedUsdCents: input.intendedUsdCents,
-      intentId,
-      customerIp: input.customerIp,
-    } as Parameters<OnRampProvider['createQuote']>[0]);
-    if (this.config.treasuryAddress && quote.destinationAddress === this.config.treasuryAddress) {
-      throw new ConflictException('On-ramp destination must never be the platform treasury');
-    }
-    if (quote.destinationAddress !== wallet.address) {
-      throw new ConflictException('On-ramp destination must be the customer wallet');
-    }
+    const quote = await this.quoteFor(customerId, wallet, intentId, input.intendedUsdCents, input.customerIp);
     await this.prisma.onRampIntent.create({
       data: {
         id: intentId,
@@ -53,10 +41,53 @@ export class OnRampService {
         status: 'CREATED',
         intendedUsdCents: input.intendedUsdCents,
         destinationAddress: wallet.address,
+        ...(input.orderId ? { orderId: input.orderId } : {}),
       },
     });
     await this.wallets.audit(customerId, 'ONRAMP_INTENT_CREATED', { intentId, provider: quote.provider, intendedUsdCents: input.intendedUsdCents });
     return { intentId, status: 'CREATED', quote };
+  }
+
+  /**
+   * A fresh provider quote for an intent that already exists (same intent id, amount and linked wallet). Used for
+   * idempotent re-requests. The destination is re-derived from the customer's CURRENT linked wallet and must match
+   * the stored one; otherwise null (the caller must create a new intent).
+   */
+  async requoteIntent(
+    customerId: string,
+    intent: { id: string; intendedUsdCents: number; destinationAddress: string; provider: string },
+    customerIp?: string,
+  ): Promise<OnRampQuote | null> {
+    const wallet = await this.requireLinkedWallet(customerId);
+    if (wallet.address !== intent.destinationAddress) return null;
+    const quote = await this.quoteFor(customerId, wallet, intent.id, intent.intendedUsdCents, customerIp);
+    return quote.provider === intent.provider ? quote : null;
+  }
+
+  private async requireLinkedWallet(customerId: string) {
+    const wallet = await this.prisma.customerWallet.findUnique({ where: { customerId } });
+    if (!wallet) throw new ConflictException('Link a wallet before buying credits');
+    if (this.config.treasuryAddress && wallet.address === this.config.treasuryAddress) {
+      throw new ConflictException('Wallet address is reserved and cannot receive on-ramp funds');
+    }
+    return wallet;
+  }
+
+  private async quoteFor(customerId: string, wallet: { address: string }, intentId: string, intendedUsdCents: number, customerIp?: string): Promise<OnRampQuote> {
+    const quote = await this.provider.createQuote({
+      customerId,
+      destinationAddress: wallet.address,
+      intendedUsdCents,
+      intentId,
+      customerIp,
+    } as Parameters<OnRampProvider['createQuote']>[0]);
+    if (this.config.treasuryAddress && quote.destinationAddress === this.config.treasuryAddress) {
+      throw new ConflictException('On-ramp destination must never be the platform treasury');
+    }
+    if (quote.destinationAddress !== wallet.address) {
+      throw new ConflictException('On-ramp destination must be the customer wallet');
+    }
+    return quote;
   }
 
   /**

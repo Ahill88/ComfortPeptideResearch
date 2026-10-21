@@ -16,6 +16,21 @@ All five flags default to off (`loadFeatureFlags` in `apps/api/src/wallet/contra
 - [ ] Open questions in `custody-model.md` sent to counsel.
 - [ ] Customer-facing wallet copy reviewed by counsel (the sandbox security panel says "You hold the key." and "User-owned").
 
+## Gate F: fee sponsorship (`FEE_SPONSORSHIP=true`; skip entirely if it stays off)
+
+Owner-approved product decision: the platform pays the Solana network fee for wallet checkout so customers who only bought USDC can pay. It is OFF by default and independent of the five flags above, but it makes the platform sign (as fee payer only) and holds a funded key, so none of the following is done yet. Nothing here has been run against a real cluster; only the sandbox signer and in-memory/Postgres tests exist.
+
+- [ ] **Fee-payer key in KMS/HSM, implemented and bound.** A `FEE_PAYER_SIGNER` implementation (cloud KMS ed25519 key, HSM, or a policy engine) that never exports key material, bound after `...checkoutPortProviders` in `CheckoutModule.register`. **Not built; the repo ships only the sandbox-only in-memory signer.** Without it the API logs a startup warning and every customer pays the fee in SOL.
+- [ ] The fee-payer account is dedicated: not the merchant treasury, not any customer wallet, never holds USDC, funded only with the SOL budget. (The service refuses a key equal to the customer or treasury; it cannot know about other accounts.)
+- [ ] Signing policy at the KMS/HSM: restrict the key to ed25519 signing of Solana messages from the API's identity only, with rate limits and an audit trail independent of the application, and the ability to disable the key without a deploy.
+- [ ] **Sponsor balance monitoring and alerting.** Alert on the fee-payer SOL balance before it reaches `FEE_SPONSOR_MIN_LAMPORTS` (below it checkout silently falls back to customer-pays and zero-SOL customers cannot pay) and on a fast burn rate. **No alerting exists in the repo.** Decide the top-up procedure and the maximum balance held.
+- [ ] Set `FEE_SPONSOR_MIN_LAMPORTS` and `FEE_SPONSOR_MAX_PER_CUSTOMER_DAY` from real fee and abuse data; review how the per-customer cap interacts with creating many approved customers, and whether a global daily ceiling is also needed (none exists).
+- [ ] Eligibility gate is enforced in the target environment (`ELIGIBILITY_REQUIRED` is ignored outside development/test): sponsorship applies only to APPROVED customers because prepare/submit refuse everyone else.
+- [ ] Key-compromise and drain runbook: how to disable the signer, rotate the key (in-flight sponsored payments fail closed with 503 and are re-prepared), and sweep remaining SOL; expected maximum loss is the funded balance.
+- [ ] A real-cluster test of a sponsored payment: two-signature transaction accepted by a devnet cluster, fee charged to the fee payer, the first signature (the fee payer's) used as the id by `DevnetSolanaChain.getTransfer`, and verification settling it. **Never done.** Also decide whether the 2 x 5000 lamport quote is right for the cluster in use (no priority fees are modelled).
+- [ ] Counsel has reviewed fee sponsorship (open question 12 in `custody-model.md`) and the customer-facing disclosure ("paid by Helix & Field").
+- [ ] Production prepared-message store is Redis (`WALLET_PREPARED_STORE`); the sponsorship decision lives in the stored compiled message and a missing entry makes submit fail with 409.
+
 ## Flags and required approvals
 
 | Flag | What it enables | Approvals and evidence required before switching on |

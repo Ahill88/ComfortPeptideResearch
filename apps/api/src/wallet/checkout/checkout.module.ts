@@ -26,13 +26,20 @@ import { VerificationService } from './verification.service';
  *   WALLET_FLAGS         -> WalletFeatureFlags (loadFeatureFlags())
  * PrismaService comes from the global PrismaModule.
  *
+ * OPTIONAL provider: FEE_PAYER_SIGNER (./fee-payer-signer.port.ts), the platform's network-fee signer. Production/devnet
+ * deployments bind a KMS/HSM-backed implementation after `...checkoutPortProviders` (wallet.wiring.ts only binds a
+ * sandbox-only in-memory signer, and only for the sandbox chain). With none bound, FEE_SPONSORSHIP has no effect: the
+ * customer pays the fee in SOL. CheckoutService injects it with @Optional(), so it is deliberately NOT in
+ * CHECKOUT_REQUIRED_TOKENS.
+ *
  * Nest only resolves providers visible inside this module, so supply the ports via
  * `CheckoutModule.register({ imports: [...], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }, ...] })`.
  * (Alternatively import the plain CheckoutModule from a @Global module that exports those tokens.)
  *
  * Provided by this module: PREPARED_MESSAGE_STORE (Redis in production, in-memory in
  * test/development; chosen by WALLET_PREPARED_STORE, see ../stores/prepared-store.factory.ts; production refuses memory) and CHECKOUT_CONFIG (reads env:
- * SOLANA_USDC_TREASURY, optional SOLANA_USDC_MAINNET_MINT).
+ * SOLANA_USDC_TREASURY, optional SOLANA_USDC_MAINNET_MINT, FEE_SPONSORSHIP / FEE_SPONSOR_MIN_LAMPORTS /
+ * FEE_SPONSOR_MAX_PER_CUSTOMER_DAY, strictly parsed: a bad value stops the API from starting).
  *
  * Exports CheckoutService, VerificationService and ReconciliationService; the lead schedules
  * ReconciliationService.reconcile() (no queue is created here).

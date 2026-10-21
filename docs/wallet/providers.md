@@ -65,15 +65,15 @@ Checklist for `ENABLE_SOLANA_MAINNET`:
 
 ## SOL fees for customer wallets
 
-A Solana transfer needs SOL for network fees (and possibly for creating a recipient token account; to be confirmed against Solana documentation). A customer with USDC but no SOL cannot send. The chain port exposes `getSolBalanceLamports` and `estimateFeeLamports` (the adapters return a constant 5000 lamports base fee; no priority fee and no RPC fee query). Current behavior:
-- Checkout prepare returns 402 when the wallet's SOL is below the estimated fee (`CheckoutService.prepare`).
-- External-transfer prepare does not block; it returns warnings when SOL is below the fee plus possible token-account rent (`TransfersService.prepare`).
-- The customer is always the fee payer; the platform holds no fee-payer key.
+A Solana transfer needs SOL for network fees (and possibly for creating a recipient token account; to be confirmed against Solana documentation). A customer who bought USDC through the MoonPay on-ramp holds no SOL. The chain port exposes `getSolBalanceLamports` and `estimateFeeLamports` (the adapters return a constant 5000 lamports base fee per signature; no priority fee and no RPC fee query). Current behavior:
+- **Wallet checkout ("Pay with Research Credits"): the platform pays the network fee when fee sponsorship is on and available** (owner-approved product decision). With `FEE_SPONSORSHIP=true`, a bound `FEE_PAYER_SIGNER` and a funded sponsor, prepare returns `feeSponsored: true` and `feePayer` = the sponsor's address, with the fee quoted for two signatures (10,000 lamports) and the disclosure saying Helix & Field pays it. The customer needs no SOL. Otherwise (flag off, no signer, sponsor balance below `FEE_SPONSOR_MIN_LAMPORTS`, customer over `FEE_SPONSOR_MAX_PER_CUSTOMER_DAY`, sponsor key equal to the customer or treasury) checkout behaves as before: `feeSponsored: false`, `feePayer` = the customer's wallet, and prepare returns 402 when the wallet's SOL is below the estimated fee (`CheckoutService.prepare`).
+- **External-transfer (withdrawal) prepare is unchanged and customer-paid.** It does not block; it returns warnings when SOL is below the fee plus possible token-account rent (`TransfersService.prepare`). The customer is the fee payer and sole signer; sponsorship never applies.
+- The platform's only signature is as fee payer of a sponsored checkout. It relies on a KMS/HSM-held fee-payer key (not in this repository); see `custody-model.md` ("Fee sponsorship") for what that key can and cannot do and the risks, and `go-live-checklist.md` for the checklist.
 
 | Option | Effect | Concerns |
 |---|---|---|
-| Customer-funded SOL | Customer buys SOL (for example via the on-ramp, if it supports it; to be confirmed with provider). | Adds friction. The platform stays out of signing. **This is what the code does.** |
-| Fee sponsorship | Platform or provider pays fees as fee payer. | A fee payer is a **platform signing key** on the transaction. That changes the "no platform signing" property in `contracts.ts` (and would fail `tests/wallet/custody-invariants.test.ts`), adds a funded hot key to protect, creates abuse and drain risk (needs per-user limits), and needs its own custody and licensing assessment. Whether Privy offers a managed gas-sponsorship feature, and who controls the fee-payer key in that case, is to be confirmed with provider. |
+| Customer-funded SOL | Customer buys SOL (for example via the on-ramp, if it supports it; to be confirmed with provider). | Adds friction; a customer who only bought USDC cannot check out. This is the **fallback** the code still uses whenever sponsorship is off or unavailable, and what withdrawals always use. |
+| Fee sponsorship | Platform pays fees as fee payer. | **Built, off by default (`FEE_SPONSORSHIP`), and requires an operator-bound `FEE_PAYER_SIGNER`.** A fee payer is a **platform signing key** on the transaction, so it changes the "no platform signing" property in `contracts.ts` (the custody scan pins the single allowed call site), adds a funded hot key to protect, creates budget-drain risk (per-customer cap, minimum balance, eligibility gate), and needs its own custody and licensing assessment by counsel. Whether Privy offers a managed gas-sponsorship feature, and who would control the fee-payer key in that case, is to be confirmed with provider. Only a sandbox in-memory signer exists in the repo; no real-cluster sponsored payment has ever been run. |
 
 ## Credentials and configuration summary
 
@@ -87,6 +87,29 @@ A Solana transfer needs SOL for network fees (and possibly for creating a recipi
 | Five `ENABLE_*` flags | API (`contracts.ts`) | In `.env.example`, all `false` |
 | `WALLET_CHAIN_MODE`, `SOLANA_NETWORK`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT` | API (`wallet.config.ts`) | In `.env.example` (`sandbox`, `solana-devnet`, devnet URL, blank) |
 | `SOLANA_USDC_MAINNET_MINT` | API checkout only (`checkout/ports.ts`) | **Not** in `.env.example` |
+| `FEE_SPONSORSHIP` | API checkout (`checkout/fee-sponsorship.ts`, read by `loadCheckoutConfig`) | In `.env.example` (`false`). Exact string `true` enables; unset/blank/`false` is off; any other value stops the API from starting. Needs a bound `FEE_PAYER_SIGNER`, otherwise it has no effect and a startup warning is logged. |
+| `FEE_SPONSOR_MIN_LAMPORTS` | same | In `.env.example` (`50000000`, 0.05 SOL). Whole lamports 1 to 10^15; sponsor balance below it (or below two signatures' fees) means fallback to customer-pays. Malformed values stop the API from starting. |
+| `FEE_SPONSOR_MAX_PER_CUSTOMER_DAY` | same | In `.env.example` (`20`). Whole number 1 to 10000, counted from `CHECKOUT_FEE_SPONSORED` audit events in the last 24 hours (no schema change); at the cap checkout falls back to customer-pays. Malformed values stop the API from starting. |
 | `WALLET_RECONCILE_INTERVAL_MS` | API (`wallet.wiring.ts`), default 60000, `0` disables | **Not** in `.env.example` |
 | `ADMIN_API_TOKEN` | API guard and admin server (`apps/admin/components/wallets/api.ts`) | **Not** in `.env.example`; all admin wallet requests are 401 until set |
 | `API_URL` (admin), `NEXT_PUBLIC_API_URL` (storefront), `ADMIN_DEV_SESSION` | Admin and storefront | **Not** in `.env.example`; defaults to `http://localhost:3001/v1` |
+
+## Checkout top-up (order-linked on-ramp)
+
+`POST /v1/wallet/onramp/order-topup` with `{ "orderId": "..." }` (same `x-customer-email` identity as the other wallet routes) lets checkout offer a MoonPay purchase sized to what a pending order is missing. Implemented in `apps/api/src/wallet/onramp/order-topup.service.ts`; it reuses `OnRampService.createIntent`, so the destination is always the customer's own linked wallet (never the treasury, never a request field).
+
+What it does, in order: the order must belong to the caller (404 otherwise, identical to "not found"), be `PENDING_PAYMENT` (409) and have no payment in flight (409); the customer must have approved eligibility (403, checked before any intent exists); spendable is read with the same computation as `GET /v1/wallet/balance`, plus this order's own active reservation added back exactly as `CheckoutService.prepare` does. If the chain cannot be read the answer is 503 and nothing is created (never "0 spendable"). If spendable covers the order the response is `{ topUpNeeded: false, orderId, requiredAtomic, spendableAtomic }` and no intent is created. Otherwise `shortfallAtomic = requiredAtomic - spendableAtomic`, `topUpUsdCents` is the shortfall (plus the fee buffer below) rounded **up to whole dollars** (the existing MoonPay path only accepts whole dollars), and the response adds `intentId`, `shortfallAtomic`, `topUpUsdCents`, `quote` (the same shape `POST /v1/wallet/onramp` returns) and `status` (`CREATED` or `PENDING`). All base-unit amounts are decimal strings.
+
+Idempotency: an open intent (`CREATED` or `PENDING`) for the same customer and order with the same `topUpUsdCents` and wallet is returned again with a freshly generated quote. If the amount changed, a new intent is created and older open intents for that order are marked `EXPIRED`. `EXPIRED` is local bookkeeping only: it does not cancel anything at MoonPay, and USDC that still arrives from an older purchase just shows up in the next chain balance read.
+
+Nothing here pays an order or credits a balance. Spendable comes only from the chain; after the funds arrive the browser re-checks the balance, and the customer's own key signs the payment through the normal prepare/submit flow. The platform never signs.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ONRAMP_FEE_BUFFER_PERCENT` | `0` | Integer 0-100 added to the shortfall before rounding up. MoonPay's fees reduce the USDC delivered and are **not quoted** by the provider here (`estimatedFeeUsdCents` and `estimatedUsdcAtomic` stay `null`), so the operator sets this from MoonPay's fee schedule. With `0`, a customer can still end slightly short; the checkout then re-checks the balance and offers another top-up. |
+| `ONRAMP_MIN_USD` | `1` | Whole-dollar floor on a purchase. This repo does not know MoonPay's real minimum; the operator must set it (to be confirmed with provider). |
+| `ONRAMP_MAX_USD` | `10000` | Whole-dollar cap (at most 1,000,000). A needed amount above it, buffer included, is refused with 400. |
+
+Values must be whole numbers in range; anything else (and a max below the min) makes the API refuse to start rather than silently change what customers are asked to pay. Eligibility follows the same `ELIGIBILITY_REQUIRED` rule as checkout.
+
+Verification status: covered by unit tests (in-memory doubles) and by `tests/wallet/e2e.integration.test.ts` against real Postgres and the sandbox chain. Never exercised against the live MoonPay widget or a real devnet/mainnet cluster; whether MoonPay honors a pre-filled amount at or above its own minimum for every region and payment method is to be confirmed with provider.

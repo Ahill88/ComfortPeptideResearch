@@ -174,9 +174,12 @@ model OnRampIntent {
   intendedUsdCents Int
   destinationAddress String
   externalReference String? @unique
+  // Set only for intents created by POST /v1/wallet/onramp/order-topup. Informational link; never credits anything.
+  orderId String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@index([customerId, createdAt])
+  @@index([customerId, orderId, status])
 }
 model CryptoTransaction {
   id String @id @default(cuid())

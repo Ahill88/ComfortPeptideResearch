@@ -359,3 +359,578 @@ test('database enforces uniqueness the application relies on', async () => {
   assert.ok(has('CustomerWallet', 'address'), 'a wallet address belongs to one customer');
   assert.ok(has('CustomerWallet', 'customerId'), 'one wallet per customer');
 });
+
+// ---------------------------------------------------------------------------------------------
+// Order-linked on-ramp top-up: POST /v1/wallet/onramp/order-topup
+// ---------------------------------------------------------------------------------------------
+
+async function orderTopUpRaw(email: string, orderId: unknown) {
+  const res = await fetch(`${base}/v1/wallet/onramp/order-topup`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-customer-email': email },
+    body: JSON.stringify({ orderId }),
+  });
+  return { status: res.status, body: (await res.json().catch(() => null)) as any };
+}
+
+test('order top-up: shortfall -> on-ramp to the customer wallet -> auto-complete payment signed by the customer key; treasury never a destination', async () => {
+  // $1.00 funded, $2.50 order: shortfall 1.50 USDC, rounded UP to whole dollars => $2.
+  const s = await setup('topup-loop', 100, 250);
+  const wallet = await client.fetchWallet(s.email);
+  assert.ok(wallet);
+  assert.equal((await client.fetchBalance(s.email)).spendableAtomic, 1_000_000n);
+  await assert.rejects(client.prepareCheckout(s.email, s.orderId), (e: any) => e.status === 402, 'prepare refuses while short');
+
+  const topUp = await client.createOrderTopUp(s.email, s.orderId);
+  assert.ok(topUp.topUpNeeded);
+  assert.equal(topUp.orderId, s.orderId);
+  assert.equal(topUp.requiredAtomic, 2_500_000n);
+  assert.equal(topUp.spendableAtomic, 1_000_000n);
+  assert.equal(topUp.shortfallAtomic, 1_500_000n);
+  assert.equal(topUp.topUpUsdCents, 200);
+  assert.equal(topUp.status, 'CREATED');
+  assert.equal(topUp.quote.sandbox, true);
+  assert.ok(topUp.quote.widgetUrl.length > 0);
+
+  // Wire shape: exact contract field names, BigInts as decimal strings, quote shaped like POST /wallet/onramp.
+  const raw = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(raw.status, 200);
+  assert.deepEqual(Object.keys(raw.body).sort(), ['intentId', 'orderId', 'quote', 'requiredAtomic', 'shortfallAtomic', 'spendableAtomic', 'status', 'topUpNeeded', 'topUpUsdCents']);
+  assert.equal(raw.body.intentId, topUp.intentId, 'repeat is idempotent');
+  assert.equal(raw.body.requiredAtomic, '2500000');
+  assert.equal(raw.body.spendableAtomic, '1000000');
+  assert.equal(raw.body.shortfallAtomic, '1500000');
+  assert.equal(raw.body.topUpUsdCents, 200);
+  assert.equal(raw.body.quote.destinationAddress, wallet.address);
+  const plain = await client.createOnrampQuote(s.email, 200);
+  assert.ok(plain.intentId);
+  const plainRaw = await (await fetch(`${base}/v1/wallet/onramp`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-customer-email': s.email }, body: JSON.stringify({ amountUsdCents: 200 }) })).json();
+  assert.deepEqual(Object.keys(raw.body.quote).sort(), Object.keys(plainRaw.quote).sort(), 'quote has exactly the POST /wallet/onramp shape');
+
+  const intent = await prisma.onRampIntent.findUniqueOrThrow({ where: { id: topUp.intentId } });
+  assert.equal(intent.orderId, s.orderId);
+  assert.equal(intent.destinationAddress, wallet.address);
+  assert.notEqual(intent.destinationAddress, treasury);
+  assert.equal(intent.intendedUsdCents, 200);
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 1, 'the repeat created no second intent');
+  assert.equal(
+    await prisma.walletAuditEvent.count({ where: { action: 'ONRAMP_ORDER_TOPUP_CREATED', detail: { path: ['orderId'], equals: s.orderId } } }),
+    1,
+  );
+  assert.equal((await client.fetchBalance(s.email)).spendableAtomic, 1_000_000n, 'an intent alone credits nothing');
+  assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status, 'PENDING_PAYMENT');
+
+  // The purchase "completes": USDC lands in the customer's own wallet and only then does spendable rise.
+  await client.mockCompleteOnramp(s.email, topUp.intentId);
+  const after = await client.fetchBalance(s.email);
+  assert.equal(after.spendableAtomic, 3_000_000n);
+  assert.ok(after.spendableAtomic >= topUp.requiredAtomic);
+  const recheck = await client.createOrderTopUp(s.email, s.orderId);
+  assert.equal(recheck.topUpNeeded, false, 'once funded the checkout needs no further top-up');
+  assert.equal(recheck.spendableAtomic, 3_000_000n);
+
+  // The browser then pays with the customer's own key.
+  const prepared = await client.prepareCheckout(s.email, s.orderId);
+  assert.equal(prepared.amountAtomic, 2_500_000n);
+  assert.equal(prepared.merchant, treasury);
+  await client.submitCheckout(s.email, s.orderId, sign(prepared.unsignedTransactionBase64, s.key));
+  const final = await settleViaPolling(s.email, s.orderId);
+  assert.equal(final.phase, 'finalized', `expected finalized, got ${final.phase} (${final.rawStatus})`);
+  assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status, 'PAID');
+  assert.equal((await client.fetchBalance(s.email)).finalizedAtomic, 500_000n, '3.00 funded - 2.50 paid');
+
+  // Treasury is the payee of the purchase only; it is never an on-ramp destination or a deposit destination.
+  const customer = await prisma.customer.findUniqueOrThrow({ where: { email: s.email } });
+  const customerIntents = await prisma.onRampIntent.findMany({ where: { customerId: customer.id } });
+  assert.ok(customerIntents.length >= 2);
+  assert.ok(customerIntents.every((i) => i.destinationAddress === wallet.address && i.destinationAddress !== treasury));
+  const deposits = await prisma.cryptoTransaction.findMany({ where: { customerId: customer.id, type: 'DEPOSIT' } });
+  assert.ok(deposits.every((d) => d.destinationAddress === wallet.address && d.destinationAddress !== treasury));
+  const purchases = await prisma.cryptoTransaction.findMany({ where: { customerId: customer.id, type: 'PURCHASE' } });
+  assert.ok(purchases.every((p) => p.sourceAddress === wallet.address && p.destinationAddress === treasury));
+});
+
+test('order top-up: enough funds => topUpNeeded false and no intent', async () => {
+  const s = await setup('topup-rich', 10_000, 2_500); // $100 funded, $25 order
+  const before = await prisma.onRampIntent.count({ where: { orderId: s.orderId } });
+  const res = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body, { topUpNeeded: false, orderId: s.orderId, requiredAtomic: '25000000', spendableAtomic: '100000000' });
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), before);
+  assert.equal(before, 0);
+});
+
+test("order top-up: other customer's order is 404, a missing order is 404, bad body is 400, no identity is 401", async () => {
+  const owner = await setup('topup-owner', 100, 500);
+  const intruder = await setup('topup-intruder', 100, 500);
+  const foreign = await orderTopUpRaw(intruder.email, owner.orderId);
+  const missing = await orderTopUpRaw(intruder.email, 'no-such-order');
+  assert.equal(foreign.status, 404);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(foreign.body.message, missing.body.message, 'a foreign order is indistinguishable from a missing one');
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: owner.orderId } }), 0);
+  assert.equal((await orderTopUpRaw(owner.email, undefined)).status, 400);
+  assert.equal((await orderTopUpRaw(owner.email, { $ne: null })).status, 400);
+  const anonymous = await fetch(`${base}/v1/wallet/onramp/order-topup`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ orderId: owner.orderId }) });
+  assert.equal(anonymous.status, 401);
+});
+
+test('order top-up: a non-PENDING_PAYMENT order is 409 and creates no intent', async () => {
+  const s = await setup('topup-paid', 100, 500);
+  await prisma.order.update({ where: { id: s.orderId }, data: { status: 'CANCELLED' } });
+  assert.equal((await orderTopUpRaw(s.email, s.orderId)).status, 409);
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 0);
+});
+
+test('order top-up: unapproved eligibility is 403 and creates no intent', async () => {
+  for (const status of [null, 'PENDING', 'REJECTED'] as const) {
+    const s = await setup(`topup-elig-${status ?? 'none'}`.toLowerCase(), 100, 500, false);
+    if (status) await setEligibility(s.email, status);
+    const res = await orderTopUpRaw(s.email, s.orderId);
+    assert.equal(res.status, 403, `status ${status ?? 'no record'}`);
+    assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 0);
+  }
+});
+
+test('order top-up: a stale chain is 503 (not zero spendable) and creates no intent; recovers afterwards', async () => {
+  const { SOLANA_CHAIN } = await import('../../apps/api/src/wallet/wallet.tokens');
+  const chain = app.get(SOLANA_CHAIN, { strict: false }) as import('../../apps/api/src/wallet/chain/sandbox-solana-chain').SandboxSolanaChain;
+  const s = await setup('topup-stale', 10_000, 500); // comfortably funded: a "0 spendable" misreading would wrongly create an intent
+  chain.setOutage(true);
+  try {
+    const res = await orderTopUpRaw(s.email, s.orderId);
+    assert.equal(res.status, 503);
+    assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 0);
+  } finally {
+    chain.setOutage(false);
+  }
+  const ok = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(ok.status, 200);
+  assert.equal(ok.body.topUpNeeded, false);
+});
+
+test('order top-up: a changed amount creates a new intent and expires the old open one', async () => {
+  const s = await setup('topup-change', 100, 250); // shortfall 1.50 => $2
+  const first = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(first.status, 200);
+  assert.equal(first.body.topUpUsdCents, 200);
+  // The customer funds $0.50 some other way; the shortfall is now 1.00 => $1.
+  const wallet = await prisma.customerWallet.findFirstOrThrow({ where: { customer: { email: s.email } } });
+  const chain = app.get((await import('../../apps/api/src/wallet/wallet.tokens')).SOLANA_CHAIN, { strict: false }) as import('../../apps/api/src/wallet/chain/sandbox-solana-chain').SandboxSolanaChain;
+  chain.creditUsdc(wallet.address, 500_000n);
+  const second = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(second.status, 200);
+  assert.equal(second.body.topUpUsdCents, 100);
+  assert.equal(second.body.shortfallAtomic, '1000000');
+  assert.notEqual(second.body.intentId, first.body.intentId);
+  const rows = await prisma.onRampIntent.findMany({ where: { orderId: s.orderId } });
+  assert.equal(rows.find((r) => r.id === first.body.intentId)?.status, 'EXPIRED');
+  assert.equal(rows.find((r) => r.id === second.body.intentId)?.status, 'CREATED');
+  assert.equal(rows.filter((r) => r.status === 'CREATED' || r.status === 'PENDING').length, 1);
+  // An expired intent can no longer be mock-completed (no credit from a superseded intent).
+  await assert.rejects(client.mockCompleteOnramp(s.email, first.body.intentId), (e: any) => e.status === 409);
+});
+
+test('order top-up: parallel identical requests create exactly one intent', async () => {
+  const s = await setup('topup-race', 100, 250);
+  const results = await Promise.all(Array.from({ length: 8 }, () => orderTopUpRaw(s.email, s.orderId)));
+  assert.ok(results.every((r) => r.status === 200), JSON.stringify(results.map((r) => r.status)));
+  assert.equal(new Set(results.map((r) => r.body.intentId)).size, 1);
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 1);
+});
+
+test("order top-up: the order's own reservation is not double counted once the customer has prepared", async () => {
+  const s = await setup('topup-hold', 300, 250); // $3.00 covers the $2.50 order
+  await client.prepareCheckout(s.email, s.orderId);
+  assert.equal((await client.fetchBalance(s.email)).spendableAtomic, 500_000n, 'balance endpoint subtracts the hold');
+  const res = await orderTopUpRaw(s.email, s.orderId);
+  assert.equal(res.status, 200);
+  assert.equal(res.body.topUpNeeded, false);
+  assert.equal(res.body.spendableAtomic, '3000000');
+  assert.equal(await prisma.onRampIntent.count({ where: { orderId: s.orderId } }), 0);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Platform-paid Solana network fee ("fee sponsorship"): POST /v1/wallet/checkout/:orderId/prepare|submit
+//
+// Real Postgres + the factory-built sandbox chain + the sandbox-only in-memory fee-payer signer (the only signer that
+// exists in this repository). The default app was booted with FEE_SPONSORSHIP unset, which is asserted first; the
+// sponsorship tests then switch the live CHECKOUT_CONFIG object on (and restore it), exactly as an operator's env would.
+// The customer's key is a throwaway Keypair created here; the signer's key lives only inside the sandbox signer.
+// ---------------------------------------------------------------------------------------------
+
+type SponsorshipPolicy = { enabled: boolean; minSponsorLamports: bigint; maxPerCustomerDay: number };
+
+async function sponsorFixtures() {
+  const { SOLANA_CHAIN } = await import('../../apps/api/src/wallet/wallet.tokens');
+  const { CHECKOUT_CONFIG, FEE_PAYER_SIGNER } = await import('../../apps/api/src/wallet/checkout/ports');
+  const { CheckoutService } = await import('../../apps/api/src/wallet/checkout/checkout.service');
+  const { VerificationService } = await import('../../apps/api/src/wallet/checkout/verification.service');
+  const chain = app.get(SOLANA_CHAIN, { strict: false }) as import('../../apps/api/src/wallet/chain/sandbox-solana-chain').SandboxSolanaChain;
+  const config = app.get(CHECKOUT_CONFIG, { strict: false }) as import('../../apps/api/src/wallet/checkout/ports').CheckoutConfig;
+  const signer = app.get(FEE_PAYER_SIGNER, { strict: false }) as import('../../apps/api/src/wallet/checkout/ports').FeePayerSigner;
+  const service = app.get(CheckoutService, { strict: false }) as any;
+  const verification = app.get(VerificationService, { strict: false }) as import('../../apps/api/src/wallet/checkout/verification.service').VerificationService;
+  return { chain, config, signer, service, verification };
+}
+
+/** Runs `body` with sponsorship switched on in the live config, restoring the original policy afterwards. */
+async function withSponsorship<T>(policy: Partial<SponsorshipPolicy>, body: (f: Awaited<ReturnType<typeof sponsorFixtures>>) => Promise<T>): Promise<T> {
+  const f = await sponsorFixtures();
+  const original = f.config.feeSponsorship;
+  f.config.feeSponsorship = { enabled: true, minSponsorLamports: 50_000_000n, maxPerCustomerDay: 20, ...policy };
+  f.chain.setSolBalance(f.signer.publicKey, 100_000_000_000n);
+  try {
+    return await body(f);
+  } finally {
+    f.config.feeSponsorship = original;
+    f.chain.setSolBalance(f.signer.publicKey, 100_000_000_000n);
+  }
+}
+
+/** The customer's wallet signing ONLY its own slot of a fee-sponsored transaction (the fee-payer slot stays empty). */
+const signCustomerOnly = (unsignedBase64: string, key: Keypair) => {
+  const tx = Transaction.from(Buffer.from(unsignedBase64, 'base64'));
+  tx.partialSign(key);
+  return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+};
+const checkoutRaw = async (email: string, orderId: string, step: 'prepare' | 'submit', body: unknown = {}) => {
+  const res = await fetch(`${base}/v1/wallet/checkout/${orderId}/${step}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-customer-email': email },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json().catch(() => null)) as any };
+};
+const zeroSol = async (email: string) => {
+  const { chain } = await sponsorFixtures();
+  const wallet = await client.fetchWallet(email);
+  assert.ok(wallet);
+  chain.setSolBalance(wallet.address, 0n);
+  return { chain, address: wallet.address };
+};
+async function addOrder(email: string, label: string, priceCents: number) {
+  const sku = `SKU-${label}-${Math.random().toString(36).slice(2, 8)}`;
+  const product = await prisma.product.create({ data: { sku, slug: sku.toLowerCase(), name: label, active: true, priceCents, inventory: 10 } });
+  await prisma.lot.create({ data: { code: `LOT-${sku}`, productId: product.id, coaKey: 'coa/test.pdf', purity: 99 } });
+  const res = await fetch(`${base}/v1/orders`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'idempotency-key': `order-${sku}-0001` },
+    body: JSON.stringify({ email, shippingAddress: '1 Lab Way, Boston, MA', researchUseAcknowledged: true, items: [{ productId: product.id, lotCode: `LOT-${sku}`, quantity: 1 }] }),
+  });
+  const order = (await res.json()) as { id: string };
+  assert.equal(res.status, 201, JSON.stringify(order));
+  return order.id;
+}
+const purchaseRow = (orderId: string) => prisma.cryptoTransaction.findFirstOrThrow({ where: { orderId, type: 'PURCHASE' }, orderBy: { createdAt: 'desc' } });
+
+test('fee sponsorship: OFF by default (real startup config); a zero-SOL customer is still refused with 402 and the wire shows the customer as fee payer', async () => {
+  const f = await sponsorFixtures();
+  assert.equal(f.config.feeSponsorship?.enabled, false, 'FEE_SPONSORSHIP unset => off');
+  assert.equal(f.config.feeSponsorship?.minSponsorLamports, 50_000_000n);
+  assert.equal(f.config.feeSponsorship?.maxPerCustomerDay, 20);
+  assert.ok(f.signer, 'the sandbox chain binds the sandbox-only signer');
+  assert.equal(f.signer.constructor.name, 'SandboxFeePayerSigner');
+
+  const s = await setup('fee-off', 5_000, 2_500);
+  const { address } = await zeroSol(s.email);
+  const refused = await checkoutRaw(s.email, s.orderId, 'prepare');
+  assert.equal(refused.status, 402);
+  assert.match(refused.body.message, /Insufficient SOL/);
+  assert.equal(await prisma.walletAuditEvent.count({ where: { action: 'CHECKOUT_FEE_SPONSORED' } }), 0);
+
+  f.chain.setSolBalance(address, 1_000_000_000n);
+  const prepared = await checkoutRaw(s.email, s.orderId, 'prepare');
+  assert.equal(prepared.status, 200);
+  assert.equal(prepared.body.feeSponsored, false);
+  assert.equal(prepared.body.feePayer, address);
+  assert.equal(prepared.body.feeLamports, '5000');
+  assert.match(prepared.body.disclosures.join(' '), /paid in SOL by your own wallet/);
+  const tx = Transaction.from(Buffer.from(prepared.body.unsignedTransactionBase64, 'base64'));
+  assert.equal(tx.feePayer!.toBase58(), address);
+  assert.equal(tx.signatures.length, 1);
+});
+
+test('fee sponsorship ON: a customer with ZERO SOL pays end to end; USDC falls by exactly the price; the platform pays the fee; the fee payer is in no instruction', async () => {
+  await withSponsorship({}, async ({ chain, signer }) => {
+    const s = await setup('fee-on', 5_000, 2_500); // $50.00 funded, $25.00 order
+    const { address } = await zeroSol(s.email);
+    const sponsorBefore = await chain.getSolBalanceLamports(signer.publicKey);
+
+    const prepared = await client.prepareCheckout(s.email, s.orderId);
+    assert.equal(prepared.feeSponsored, true);
+    assert.equal(prepared.feePayer, signer.publicKey);
+    assert.notEqual(prepared.feePayer, address);
+    assert.equal(prepared.feeLamports, 10_000n);
+    assert.match(prepared.disclosures.join(' '), /paid by Helix & Field/);
+    assert.doesNotMatch(prepared.disclosures.join(' '), /paid in SOL by your own wallet/);
+
+    const wire = await checkoutRaw(s.email, s.orderId, 'prepare');
+    assert.equal(wire.status, 200);
+    assert.equal(wire.body.feePayer, signer.publicKey);
+    assert.equal(wire.body.feeSponsored, true);
+    assert.ok(!JSON.stringify(wire.body).includes(sponsorBefore.toString()), 'the sponsor balance is never leaked');
+
+    const unsigned = Transaction.from(Buffer.from(prepared.unsignedTransactionBase64, 'base64'));
+    const message = unsigned.compileMessage();
+    assert.equal(message.accountKeys[0].toBase58(), signer.publicKey);
+    assert.deepEqual(message.accountKeys.slice(0, message.header.numRequiredSignatures).map((k) => k.toBase58()), [signer.publicKey, address]);
+    assert.ok(message.instructions.every((ix) => !ix.accounts.includes(0) && ix.programIdIndex !== 0), 'fee payer is in no instruction');
+    assert.equal(unsigned.instructions[0].keys[3].pubkey.toBase58(), address, 'the customer is still the USDC authority');
+    assert.ok(unsigned.signatures.every((sig) => sig.signature === null), 'nothing is platform-signed at prepare');
+
+    await client.submitCheckout(s.email, s.orderId, signCustomerOnly(prepared.unsignedTransactionBase64, s.key));
+    const final = await settleViaPolling(s.email, s.orderId);
+    assert.equal(final.phase, 'finalized', `expected finalized, got ${final.phase} (${final.rawStatus})`);
+    assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status, 'PAID');
+
+    assert.equal((await client.fetchBalance(s.email)).finalizedAtomic, 25_000_000n, '50.00 funded - exactly 25.00 paid');
+    assert.equal(await chain.getSolBalanceLamports(address), 0n, 'the customer never held or spent SOL');
+    assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore - 10_000n, 'the platform paid 2 x 5000 lamports');
+
+    // The recorded transaction id is the FEE PAYER's signature, and the same id is what the status route reports.
+    const row = await purchaseRow(s.orderId);
+    assert.equal(row.status, 'FINALIZED');
+    assert.equal(row.sourceAddress, address);
+    assert.equal(row.destinationAddress, treasury);
+    assert.equal(row.feeLamports, 10_000n);
+    assert.equal(final.signature, row.txSignature);
+    const onChain = await chain.getTransfer(row.txSignature!);
+    assert.ok(onChain);
+    assert.equal(onChain.sourceOwner, address, 'verification is bound to the customer wallet, not the fee payer');
+
+    const events = await prisma.walletAuditEvent.findMany({ where: { action: 'CHECKOUT_FEE_SPONSORED', detail: { path: ['reference'], equals: row.reference } } });
+    assert.equal(events.length, 1, 'one sponsorship audit event per sponsored payment');
+    const submitted = await prisma.walletAuditEvent.findFirstOrThrow({ where: { action: 'checkout.submitted', detail: { path: ['reference'], equals: row.reference } } });
+    assert.equal((submitted.detail as any).txSignature, row.txSignature);
+    assert.equal((submitted.detail as any).feeSponsored, true);
+  });
+});
+
+test('fee sponsorship ON: a customer-supplied fee-payer signature is replaced, a missing/forged customer signature is rejected, and a tampered message is rejected; nothing is broadcast', async () => {
+  await withSponsorship({}, async ({ chain, signer }) => {
+    const s = await setup('fee-forge', 5_000, 2_500);
+    const { address } = await zeroSol(s.email);
+    const prepared = await client.prepareCheckout(s.email, s.orderId);
+    const sponsorBefore = await chain.getSolBalanceLamports(signer.publicKey);
+    const refuse = async (signed: string, status: number, match: RegExp) => {
+      const res = await checkoutRaw(s.email, s.orderId, 'submit', { signedTransactionBase64: signed });
+      assert.equal(res.status, status, JSON.stringify(res.body));
+      assert.match(res.body.message, match);
+      assert.equal((await purchaseRow(s.orderId)).status, 'PREPARED', 'nothing was claimed');
+      assert.equal((await purchaseRow(s.orderId)).txSignature, null);
+      assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore, 'no fee was taken: nothing was broadcast');
+      assert.equal(await chain.getFinalizedUsdcBalance(address), 50_000_000n, 'no USDC moved');
+    };
+    // missing customer signature (fully unsigned, and a fee-payer slot stuffed with junk instead)
+    await refuse(prepared.unsignedTransactionBase64, 400, /not signed by the customer/);
+    const stuffed = Transaction.from(Buffer.from(prepared.unsignedTransactionBase64, 'base64'));
+    stuffed.signatures[0].signature = Buffer.alloc(64, 1);
+    await refuse(stuffed.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'), 400, /not signed by the customer/);
+    // forged customer signature
+    const forged = Transaction.from(Buffer.from(prepared.unsignedTransactionBase64, 'base64'));
+    forged.signatures[1].signature = Buffer.alloc(64, 7);
+    await refuse(forged.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'), 400, /signature is invalid/);
+    // tampered message (different amount), correctly signed by the customer over the TAMPERED bytes
+    const tampered = Transaction.from(Buffer.from(prepared.unsignedTransactionBase64, 'base64'));
+    tampered.instructions[0].data[1] ^= 1;
+    tampered.partialSign(s.key);
+    await refuse(tampered.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'), 400, /does not match the prepared payment/);
+
+    // A junk fee-payer signature riding along with a genuine customer signature is ignored: the payment succeeds, and the
+    // chain saw a valid platform signature instead of the junk.
+    const genuine = Transaction.from(Buffer.from(signCustomerOnly(prepared.unsignedTransactionBase64, s.key), 'base64'));
+    const junk = Buffer.alloc(64, 5);
+    genuine.signatures[0].signature = junk;
+    await client.submitCheckout(s.email, s.orderId, genuine.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64'));
+    const final = await settleViaPolling(s.email, s.orderId);
+    assert.equal(final.phase, 'finalized');
+    const row = await purchaseRow(s.orderId);
+    const { base58Encode } = await import('../../apps/api/src/wallet/checkout/checkout.util');
+    assert.notEqual(row.txSignature, base58Encode(junk), 'the junk never became the transaction id');
+    assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore - 10_000n);
+    assert.equal((await client.fetchBalance(s.email)).finalizedAtomic, 25_000_000n);
+  });
+});
+
+test('fee sponsorship ON: sponsor below the minimum balance => fallback (402 for a zero-SOL customer, customer-paid success for a customer with SOL)', async () => {
+  await withSponsorship({}, async ({ chain, signer }) => {
+    chain.setSolBalance(signer.publicKey, 49_999_999n);
+    const poor = await setup('fee-lowsponsor-zero', 5_000, 2_500);
+    await zeroSol(poor.email);
+    const refused = await checkoutRaw(poor.email, poor.orderId, 'prepare');
+    assert.equal(refused.status, 402);
+    assert.match(refused.body.message, /Insufficient SOL in the customer wallet/);
+
+    const rich = await setup('fee-lowsponsor-sol', 5_000, 2_500); // sandbox faucet gives every new owner 1 SOL
+    const prepared = await client.prepareCheckout(rich.email, rich.orderId);
+    assert.equal(prepared.feeSponsored, false);
+    assert.equal(prepared.feeLamports, 5_000n);
+    const wallet = await client.fetchWallet(rich.email);
+    assert.equal(prepared.feePayer, wallet!.address);
+    await client.submitCheckout(rich.email, rich.orderId, sign(prepared.unsignedTransactionBase64, rich.key));
+    assert.equal((await settleViaPolling(rich.email, rich.orderId)).phase, 'finalized');
+    assert.equal(await chain.getSolBalanceLamports(signer.publicKey), 49_999_999n, 'the sponsor paid nothing');
+  });
+});
+
+test('fee sponsorship ON: the per-customer daily cap (real WalletAuditEvent rows, last 24h) falls back to customer-pays', async () => {
+  await withSponsorship({ maxPerCustomerDay: 1 }, async () => {
+    const s = await setup('fee-cap', 10_000, 2_500);
+    await zeroSol(s.email);
+    const first = await client.prepareCheckout(s.email, s.orderId);
+    assert.equal(first.feeSponsored, true);
+    const again = await client.prepareCheckout(s.email, s.orderId); // re-prepare: same payment, not counted twice
+    assert.equal(again.feeSponsored, true);
+    const customer = await prisma.customer.findUniqueOrThrow({ where: { email: s.email } });
+    assert.equal(await prisma.walletAuditEvent.count({ where: { customerId: customer.id, action: 'CHECKOUT_FEE_SPONSORED' } }), 1);
+
+    // A second payment by the same customer hits the cap of 1 and, with zero SOL, is refused like before.
+    const second = await addOrder(s.email, 'fee-cap-2', 1_000);
+    const refused = await checkoutRaw(s.email, second, 'prepare');
+    assert.equal(refused.status, 402);
+    assert.match(refused.body.message, /Insufficient SOL in the customer wallet/);
+    assert.equal(await prisma.walletAuditEvent.count({ where: { customerId: customer.id, action: 'CHECKOUT_FEE_SPONSORED' } }), 1, 'a fallback is not counted');
+
+    // Events older than 24 hours do not count: age the event and the second order is sponsored.
+    await prisma.walletAuditEvent.updateMany({ where: { customerId: customer.id, action: 'CHECKOUT_FEE_SPONSORED' }, data: { createdAt: new Date(Date.now() - 25 * 3_600_000) } });
+    const allowed = await checkoutRaw(s.email, second, 'prepare');
+    assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
+    assert.equal(allowed.body.feeSponsored, true);
+
+    // Another customer is unaffected by this customer's count.
+    const other = await setup('fee-cap-other', 5_000, 2_500);
+    await zeroSol(other.email);
+    assert.equal((await client.prepareCheckout(other.email, other.orderId)).feeSponsored, true);
+  });
+});
+
+test('fee sponsorship ON: signer unbound => fallback at prepare, and a sponsored submit is 503 with nothing broadcast; signer failure releases the claim and a retry works', async () => {
+  await withSponsorship({}, async ({ chain, signer, service }) => {
+    const s = await setup('fee-signer', 5_000, 2_500);
+    const { address } = await zeroSol(s.email);
+    const prepared = await client.prepareCheckout(s.email, s.orderId);
+    assert.equal(prepared.feeSponsored, true);
+    const signed = signCustomerOnly(prepared.unsignedTransactionBase64, s.key);
+    const sponsorBefore = await chain.getSolBalanceLamports(signer.publicKey);
+
+    // unbound
+    const bound = service.feePayerSigner;
+    service.feePayerSigner = undefined;
+    try {
+      const noSigner = await checkoutRaw(s.email, s.orderId, 'submit', { signedTransactionBase64: signed });
+      assert.equal(noSigner.status, 503);
+      assert.equal((await purchaseRow(s.orderId)).status, 'PREPARED');
+      const fallback = await checkoutRaw(s.email, s.orderId, 'prepare');
+      assert.equal(fallback.status, 402, 'zero-SOL customer, no signer => the old refusal');
+    } finally {
+      service.feePayerSigner = bound;
+    }
+
+    // signer throws
+    const realSign = signer.signMessage.bind(signer);
+    let calls = 0;
+    (signer as any).signMessage = async (message: Uint8Array) => {
+      calls++;
+      throw new Error('KMS unavailable');
+    };
+    try {
+      const prep = await checkoutRaw(s.email, s.orderId, 'prepare'); // fresh message after the fallback above
+      assert.equal(prep.status, 200);
+      assert.equal(prep.body.feeSponsored, true);
+      const failed = await checkoutRaw(s.email, s.orderId, 'submit', { signedTransactionBase64: signCustomerOnly(prep.body.unsignedTransactionBase64, s.key) });
+      assert.equal(failed.status, 503);
+      assert.ok(calls >= 1);
+    } finally {
+      (signer as any).signMessage = realSign;
+    }
+    const released = await purchaseRow(s.orderId);
+    assert.equal(released.status, 'PREPARED', 'claim released');
+    assert.equal(released.txSignature, null);
+    assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore, 'nothing was broadcast');
+    assert.equal(await chain.getFinalizedUsdcBalance(address), 50_000_000n);
+
+    // retry works with the same customer-signed payload
+    const retryPrep = await client.prepareCheckout(s.email, s.orderId);
+    await client.submitCheckout(s.email, s.orderId, signCustomerOnly(retryPrep.unsignedTransactionBase64, s.key));
+    assert.equal((await settleViaPolling(s.email, s.orderId)).phase, 'finalized');
+    assert.equal((await client.fetchBalance(s.email)).finalizedAtomic, 25_000_000n);
+  });
+});
+
+test('fee sponsorship ON: a sponsor key equal to the customer wallet or the merchant treasury is refused (customer-pays fallback), never used', async () => {
+  await withSponsorship({}, async ({ chain, service }) => {
+    const s = await setup('fee-samekey', 5_000, 2_500);
+    const { address } = await zeroSol(s.email);
+    const bound = service.feePayerSigner;
+    try {
+      for (const publicKey of [address, treasury]) {
+        let asked = 0;
+        service.feePayerSigner = { publicKey, signMessage: async () => (asked++, new Uint8Array(64)) };
+        chain.setSolBalance(publicKey, publicKey === address ? 0n : 100_000_000_000n);
+        const res = await checkoutRaw(s.email, s.orderId, 'prepare');
+        assert.equal(res.status, 402, `${publicKey === address ? 'customer' : 'merchant'} key: ${JSON.stringify(res.body)}`);
+        assert.equal(asked, 0);
+        assert.equal(await prisma.walletAuditEvent.count({ where: { action: 'CHECKOUT_FEE_SPONSORED', detail: { path: ['orderId'], equals: s.orderId } } }), 0);
+      }
+    } finally {
+      service.feePayerSigner = bound;
+    }
+  });
+});
+
+test('fee sponsorship: verification refuses a transfer whose authority is the fee payer or any non-customer (real DB, sandbox chain)', async () => {
+  await withSponsorship({}, async ({ chain, signer, verification }) => {
+    const { createHash } = await import('node:crypto');
+    const { referenceKeyFor } = await import('../../apps/api/src/wallet/checkout/checkout.util');
+    const { USDC_DEVNET_MINT } = await import('../../apps/api/src/wallet/contracts');
+    const authorities: Array<[string, () => string]> = [
+      ['the fee payer', () => signer.publicKey],
+      ['a stranger', () => Keypair.generate().publicKey.toBase58()],
+    ];
+    for (const [label, authority] of authorities) {
+      const s = await setup(`fee-verify-${label.replace(/\W/g, '')}`, 5_000, 2_500);
+      const wallet = await client.fetchWallet(s.email);
+      const customer = await prisma.customer.findUniqueOrThrow({ where: { email: s.email } });
+      const signature = createHash('sha256').update(`forged-${label}-${s.orderId}`).digest('hex').padEnd(88, 'a');
+      const reference = `chk_fee_${s.orderId}`.slice(0, 40);
+      await prisma.cryptoTransaction.create({
+        data: { customerId: customer.id, type: 'PURCHASE', status: 'SUBMITTED', amountAtomic: 25_000_000n, sourceAddress: wallet!.address, destinationAddress: treasury, mint: USDC_DEVNET_MINT, network: 'solana-devnet', reference, orderId: s.orderId, txSignature: signature },
+      });
+      chain.recordTransfer({
+        signature,
+        network: 'solana-devnet',
+        finalized: true,
+        succeeded: true,
+        mint: USDC_DEVNET_MINT,
+        sourceOwner: authority(),
+        destinationOwner: treasury,
+        amountAtomic: 25_000_000n,
+        referenceKeys: [referenceKeyFor(reference).toBase58()],
+      });
+      const result = await verification.verifyAndSettle({ paymentReference: reference });
+      assert.equal(result.outcome, 'FAILED', label);
+      assert.match(result.reason ?? '', /wrong source owner/, label);
+      assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: s.orderId } })).status, 'PENDING_PAYMENT', `${label}: the order is not paid`);
+    }
+  });
+});
+
+test('fee sponsorship does not touch withdrawals: the customer is still the fee payer and sole signer, and the sponsor pays nothing', async () => {
+  await withSponsorship({}, async ({ chain, signer }) => {
+    const s = await setup('fee-withdraw', 5_000, 2_500);
+    const { address } = await zeroSol(s.email);
+    chain.setSolBalance(address, 1_000_000_000n);
+    const sponsorBefore = await chain.getSolBalanceLamports(signer.publicKey);
+    const destination = Keypair.generate().publicKey.toBase58();
+    const prepared = await client.prepareTransfer(s.email, { destination, amountAtomic: 1_000_000n });
+    const tx = Transaction.from(Buffer.from(prepared.unsignedTransactionBase64, 'base64'));
+    assert.equal(tx.feePayer!.toBase58(), address);
+    assert.equal(tx.signatures.length, 1);
+    assert.ok(!tx.instructions.some((ix) => ix.keys.some((k) => k.pubkey.toBase58() === signer.publicKey)));
+    const sent = await client.submitTransfer(s.email, prepared.id, sign(prepared.unsignedTransactionBase64, s.key));
+    assert.ok(sent.signature.length >= 64);
+    assert.equal(await chain.getSolBalanceLamports(signer.publicKey), sponsorBefore, 'withdrawals stay customer-paid');
+    assert.equal((await client.fetchBalance(s.email)).spendableAtomic, 49_000_000n);
+  });
+});
