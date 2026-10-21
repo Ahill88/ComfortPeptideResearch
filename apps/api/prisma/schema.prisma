@@ -74,6 +74,10 @@ model Order {
   items OrderItem[]
   payment Payment?
   creditReservation CreditReservation?
+  // Snapshot of where to ship, exactly as the customer entered it at order time (free text today). NULL only for orders created before this column existed.
+  shippingAddress String?
+  shipments Shipment[]
+  events OrderEvent[]
   @@unique([customerId, idempotencyKey])
 }
 model OrderItem {
@@ -256,4 +260,81 @@ model CustomerEligibility {
   reviewedAt DateTime?
   reviewedBy String?
   notes String?
+}
+
+// ---------------------------------------------------------------------------
+// Back office: admin accounts, sessions, audit trail, fulfillment.
+// Admin passwords are scrypt hashes; MFA (TOTP) is mandatory and its seed is stored encrypted (AES-256-GCM, key from env).
+// Session tokens are random and only their SHA-256 is stored.
+// ---------------------------------------------------------------------------
+enum AdminRole {
+  OWNER
+  STAFF
+}
+model AdminUser {
+  id String @id @default(cuid())
+  email String @unique
+  name String
+  role AdminRole @default(STAFF)
+  passwordHash String
+  mfaSeedEnc String
+  active Boolean @default(true)
+  failedLogins Int @default(0)
+  lockedUntil DateTime?
+  lastLoginAt DateTime?
+  createdAt DateTime @default(now())
+  sessions AdminSession[]
+  auditEvents AdminAuditEvent[]
+}
+model AdminSession {
+  id String @id @default(cuid())
+  adminId String
+  admin AdminUser @relation(fields:[adminId], references:[id])
+  tokenHash String @unique
+  createdAt DateTime @default(now())
+  lastSeenAt DateTime @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  ip String?
+  userAgent String?
+  @@index([adminId])
+}
+model AdminAuditEvent {
+  id String @id @default(cuid())
+  adminId String?
+  admin AdminUser? @relation(fields:[adminId], references:[id])
+  action String
+  targetType String
+  targetId String?
+  detail Json?
+  ip String?
+  createdAt DateTime @default(now())
+  @@index([targetType, targetId, createdAt])
+  @@index([adminId, createdAt])
+}
+model Shipment {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId], references:[id])
+  carrier String
+  trackingNumber String
+  shippedAt DateTime @default(now())
+  deliveredAt DateTime?
+  createdByAdminId String?
+  note String?
+  @@unique([orderId, trackingNumber])
+  @@index([orderId])
+}
+// Append-only history of an order: status changes and staff notes.
+model OrderEvent {
+  id String @id @default(cuid())
+  orderId String
+  order Order @relation(fields:[orderId], references:[id])
+  kind String
+  fromStatus OrderStatus?
+  toStatus OrderStatus?
+  note String?
+  adminId String?
+  createdAt DateTime @default(now())
+  @@index([orderId, createdAt])
 }
