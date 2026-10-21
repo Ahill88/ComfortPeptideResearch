@@ -5,6 +5,8 @@ import { shortId, statusLabel } from '../../../../components/console/format';
 import { callApi } from '../../../../lib/server/api';
 import { ORDER_ID } from '../../../../lib/queue';
 import { expireOnUnauthorized, requireSession } from '../../../../lib/server/session';
+import { storefrontBase } from '../../../../lib/server/storefront';
+import { verifyAddress } from '../../../../lib/coa';
 import type { AdminOrderDetail } from '../../../../lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -34,6 +36,7 @@ export default async function PackingSlip({ params }: { params: Promise<{ id: st
   const order = result.data;
   const address = order.shippingAddress?.trim() || null;
   const units = order.items.reduce((sum, item) => sum + item.quantity, 0);
+  const verifyBase = storefrontBase(); // STOREFRONT_PUBLIC_URL, read at request time; empty means relative text
   const packable = order.status === 'PAID' || order.status === 'PROCESSING';
 
   return (
@@ -67,7 +70,7 @@ export default async function PackingSlip({ params }: { params: Promise<{ id: st
           <h2 id="slip-items">Items to pick</h2>
           <table className="slip-table">
             <thead>
-              <tr><th scope="col" className="slip-check">Picked</th><th scope="col">SKU</th><th scope="col">Product</th><th scope="col">Lot</th><th scope="col" className="slip-qty">Qty</th></tr>
+              <tr><th scope="col" className="slip-check">Picked</th><th scope="col">SKU</th><th scope="col">Product</th><th scope="col">Lot and verification address</th><th scope="col" className="slip-qty">Qty</th></tr>
             </thead>
             <tbody>
               {order.items.map((item) => (
@@ -75,7 +78,10 @@ export default async function PackingSlip({ params }: { params: Promise<{ id: st
                   <td className="slip-check"><span className="box" aria-hidden="true" /><span className="sr-only">Unchecked</span></td>
                   <td className="mono">{item.sku}</td>
                   <td>{item.name}</td>
-                  <td className="mono slip-lot">{item.lotCode ?? '\u2014'}</td>
+                  <td className="mono slip-lot">
+                    {item.lotCode ?? '\u2014'}
+                    {item.lotCode && <span className="slip-verify" data-verify>{verifyAddress(verifyBase, item.lotCode)}</span>}
+                  </td>
                   <td className="slip-qty">{item.quantity}</td>
                 </tr>
               ))}

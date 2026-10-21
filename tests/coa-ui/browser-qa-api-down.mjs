@@ -1,0 +1,20 @@
+// Run with the fake API STOPPED (storefront dev instance on :3291 still pointed at it): every page must degrade calmly.
+import { createRequire } from 'node:module';
+import assert from 'node:assert/strict';
+const temp = '/var/folders/v9/840n4c810px9_kxb2ntl2xt00000gn/T/opencode';
+const { chromium } = createRequire(`${process.env.QA_TOOLS || `${temp}/browser-qa-tools`}/package.json`)('playwright');
+const baseURL = process.env.QA_BASE_URL || 'http://localhost:3291';
+const browser = await chromium.launch({ headless: true, executablePath: process.env.QA_BROWSER || '/Users/andrewsilva/Library/Caches/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-mac-arm64/chrome-headless-shell' });
+const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
+const errors = [];
+page.on('pageerror', (e) => errors.push(e.message));
+let failed = 0;
+const check = async (name, fn) => { try { await fn(); console.log(`PASS ${name}`); } catch (e) { failed++; console.log(`FAIL ${name}: ${e.message}`); } };
+const text = () => page.locator('main').innerText();
+await check('lot page: "Record unavailable", HTTP 200 (not 404, not 500)', async () => { const r = await page.goto(`${baseURL}/verify/HF-GHK-2610A`, { waitUntil: 'networkidle' }); assert.equal(r.status(), 200); const t = await text(); assert(t.includes('Record unavailable') && !t.includes('Current COA')); });
+await check('landing: renders, publisher shown as unavailable not invented', async () => { const r = await page.goto(`${baseURL}/verify`, { waitUntil: 'networkidle' }); assert.equal(r.status(), 200); const t = await text(); assert(t.includes('could not be loaded right now')); });
+await check('landing: file lookup says it could not check, still shows the local SHA-256', async () => { await page.goto(`${baseURL}/verify`, { waitUntil: 'networkidle' }); await page.locator('#coa-file-lookup').setInputFiles({ name: 'x.pdf', mimeType: 'application/pdf', buffer: Buffer.from('abc') }); await page.getByText('Could not complete the check').waitFor({ timeout: 8000 }); const t = await text(); assert(t.includes('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')); assert(!/Match:/.test(t)); });
+await check('product panel: neutral "could not be loaded", no COA implied', async () => { await page.goto(`${baseURL}/catalog/ghk-cu`, { waitUntil: 'networkidle' }); await page.waitForFunction(() => document.querySelector('[data-coa-panel]')?.getAttribute('data-coa-panel') === 'unavailable', null, { timeout: 12000 }); const t = await page.locator('[data-coa-panel]').innerText(); assert(t.includes('could not be loaded') && !/published/i.test(t)); });
+await check('no uncaught page errors', async () => assert.deepEqual(errors, []));
+await browser.close();
+process.exit(failed ? 1 : 0);

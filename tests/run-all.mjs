@@ -38,7 +38,12 @@ for (const file of skipped) console.log(`SKIP  ${relative(root, file)}  (set TES
 
 // Suites that must not run against the shared `public`/`dev` schemas (they deactivate other admins, etc.) get their own scratch
 // schema, created and migrated on demand in the same local database.
-const SCRATCH_SCHEMA_SUITES = new Map([['admin-auth.integration.test.ts', 'it_admin_auth']]);
+const SCRATCH_SCHEMA_SUITES = new Map([
+  ['admin-auth.integration.test.ts', 'it_admin_auth'],
+  ['coa-admin.integration.test.ts', 'it_coa'],
+  ['coa-public.integration.test.ts', 'it_coa'],
+  ['anchor-db.integration.test.ts', 'it_coa'],
+]);
 function scratchEnv(file) {
   const name = [...SCRATCH_SCHEMA_SUITES].find(([suffix]) => file.endsWith(suffix))?.[1];
   if (!name || !process.env.TEST_DATABASE_URL) return {};

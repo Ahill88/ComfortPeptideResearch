@@ -6,6 +6,7 @@ import { ProductPrice, ProductPreviewLabel } from '../../../components/product-p
 import { ProductPurchase } from '../../../components/product-purchase';
 import { ProductGallery } from '../../../components/product-gallery';
 import { ProductCard } from '../../../components/product-card';
+import { LotCoaPanel } from '../../../components/coa/lot-coa-panel';
 
 export function generateStaticParams() { return products.map(({ slug }) => ({ slug })); }
 
@@ -25,6 +26,7 @@ export default async function ProductPage({ params }: { params: Promise<{ slug: 
         </div>
         <p className="order-4 min-w-0 max-w-md text-sm leading-6 text-slate-600 lg:order-none lg:mt-5 lg:leading-7">{product.description}</p>
         <div className="order-3 min-w-0 rounded-2xl border border-slate-200 bg-white p-5 sm:p-7 lg:order-none lg:mt-8"><div className="flex items-end justify-between gap-4 border-b border-slate-200 pb-5"><div><p className="text-xs uppercase tracking-[.14em] text-slate-600">Preview price / {product.sizeLabel}</p><p className="mt-2 text-3xl font-medium tracking-tight"><ProductPrice product={product} /></p></div><span className="pb-1 text-xs text-slate-600">USD</span></div><ProductPurchase slug={product.slug} /></div>
+        <LotCoaPanel slug={product.slug} className="order-3 min-w-0 lg:order-none lg:mt-4" />
         <div className="order-5 min-w-0 space-y-4 text-xs leading-5 text-slate-600 lg:order-none lg:mt-6"><p className="flex gap-3"><FileText size={17} className="mt-0.5 shrink-0" /><span><strong className="font-medium text-[#0B1220]">Documentation pending</strong><br />Seed-data preview. Specifications and availability are not yet verified.</span></p><p className="flex gap-3"><Truck size={17} className="mt-0.5 shrink-0" /><span><strong className="font-medium text-[#0B1220]">Shipping at checkout</strong><br />Review shipping costs before completing your order.</span></p></div>
         <p className="order-6 min-w-0 border-t border-slate-200 pt-5 text-xs leading-5 text-slate-600 lg:order-none lg:mt-6">For research use only. Not for human or veterinary use.</p>
       </div>

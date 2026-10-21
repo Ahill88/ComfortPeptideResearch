@@ -49,10 +49,17 @@ test('custody: apps/api/src (non-test) never generates, loads, holds or uses pri
  */
 const SANDBOX_SIGNER_FILE = 'apps/api/src/wallet/chain/sandbox-fee-payer-signer.ts';
 const FEE_PAYER_PORT_FILE = 'apps/api/src/wallet/checkout/fee-payer-signer.port.ts';
+/*
+ * SECOND, EQUALLY NARROW ALLOWANCE (COA anchoring): exactly one more statement of the same shape, in
+ * coa/anchor/coa-publisher-signer.port.ts, the single call into the bound KMS/HSM CoaPublisherSigner. It can authorize only a
+ * Memo-program transaction (see the test "custody: the COA publisher signing allowance ..." below, which pins why and how).
+ */
+const COA_PUBLISHER_PORT_FILE = 'apps/api/src/coa/anchor/coa-publisher-signer.port.ts';
+const COA_ANCHOR_SERVICE_FILE = 'apps/api/src/coa/anchor/anchor.service.ts';
 function isSponsorSignerAllowance(hit: { file: string; rule: string; text: string }): boolean {
   const file = rel(absoluteHitPath(hit.file));
   if (file === SANDBOX_SIGNER_FILE) return hit.rule.startsWith('privateKey') && /^this\.#key\s*=\s*pair\.privateKey;$/.test(hit.text);
-  if (file === FEE_PAYER_PORT_FILE) return hit.rule.startsWith('transaction/message signing') && /^signature\s*=\s*await signer\.signMessage\(message\);$/.test(hit.text);
+  if (file === FEE_PAYER_PORT_FILE || file === COA_PUBLISHER_PORT_FILE) return hit.rule.startsWith('transaction/message signing') && /^signature\s*=\s*await signer\.signMessage\(message\);$/.test(hit.text);
   return false;
 }
 
@@ -67,7 +74,7 @@ test('custody: the fee-payer signing allowance is confined to the port helper an
   const implementing = files.filter((f) => /\bimplements\s+FeePayerSigner\b/.test(stripComments(read(f)))).map(rel);
   assert.deepEqual(implementing, [SANDBOX_SIGNER_FILE], `no production FeePayerSigner implementation may ship in apps/api/src; found: ${implementing.join(', ')}`);
   const calls = files.filter((f) => /\.\s*signMessage\s*\(/.test(stripComments(read(f)))).map(rel);
-  assert.deepEqual(calls, [FEE_PAYER_PORT_FILE], `signMessage may be called only by the port helper; found: ${calls.join(', ')}`);
+  assert.deepEqual(calls.sort(), [COA_PUBLISHER_PORT_FILE, FEE_PAYER_PORT_FILE].sort(), `signMessage may be called only by the two port helpers (fee payer, COA publisher); found: ${calls.join(', ')}`);
   // 3. The sandbox signer must keep its guards and must not load, persist or expose key material.
   // The only environment access tolerated is the injectable default `env: EnvLike = process.env` fed to the runtime gate.
   const src = stripComments(read(path.join(ROOT, SANDBOX_SIGNER_FILE))).replace('env: EnvLike = process.env', 'env: EnvLike');
@@ -86,6 +93,40 @@ test('custody: the fee-payer signing allowance is confined to the port helper an
   // 4. The port file holds no key material and no implementation, and the platform never types the word "secret" there.
   const port = stripComments(read(path.join(ROOT, FEE_PAYER_PORT_FILE)));
   assert.doesNotMatch(port, /secret|generateKeyPair|Keypair|createPrivateKey|process\.env|\bfs\b/i, 'the port must hold no key material');
+});
+
+test('custody: the COA publisher signing allowance is one port helper, a memo-only message guard in front of it, and no key material', () => {
+  const files = API_FILES();
+  // The only implementation of either port in apps/api/src is the sandbox fee-payer signer: nothing holds the publisher key here.
+  const implementing = files.filter((f) => /\bimplements\s+CoaPublisherSigner\b/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(implementing, [], `no CoaPublisherSigner implementation may ship in apps/api/src; found: ${implementing.join(', ')}`);
+  const binding = files.filter((f) => /provide:\s*COA_PUBLISHER_SIGNER\b/.test(stripComments(read(f)))).map(rel);
+  assert.deepEqual(binding, ['apps/api/src/coa/anchor/anchor.module.ts'], 'only the anchor module may bind COA_PUBLISHER_SIGNER, and only to undefined');
+  const module = stripComments(read(path.join(ROOT, 'apps/api/src/coa/anchor/anchor.module.ts')));
+  assert.match(module, /provide:\s*COA_PUBLISHER_SIGNER,\s*useFactory:\s*\(\)\s*:\s*CoaPublisherSigner\s*\|\s*undefined\s*=>\s*undefined\s*\}/, 'the default COA_PUBLISHER_SIGNER binding must be undefined (no key in the repo)');
+  // Only the anchor service asks for a publisher signature, and the memo-only guard runs on the exact bytes right before it.
+  const requesting = files.filter((f) => /\brequestCoaPublisherSignature\s*\(/.test(stripComments(read(f)))).map(rel).sort();
+  assert.deepEqual(requesting, [COA_ANCHOR_SERVICE_FILE, COA_PUBLISHER_PORT_FILE].sort(), 'only the anchor service may request a COA publisher signature');
+  const service = stripComments(read(path.join(ROOT, COA_ANCHOR_SERVICE_FILE)));
+  const guard = service.indexOf('assertMemoOnlyMessage(');
+  const sign = service.indexOf('requestCoaPublisherSignature(');
+  assert.ok(guard > 0 && guard < sign, 'assertMemoOnlyMessage must run before requestCoaPublisherSignature');
+  assert.equal((service.match(/requestCoaPublisherSignature\(/g) ?? []).length, 1, 'exactly one signing request in the anchor service');
+  assert.match(service.slice(guard, sign), /messageBytes/, 'the guard and the signing request must use the same message bytes');
+  // The guard itself must keep checking the whole shape.
+  const message = stripComments(read(path.join(ROOT, 'apps/api/src/coa/anchor/coa-anchor-message.ts')));
+  const guardBody = message.slice(message.indexOf('export function assertMemoOnlyMessage'), message.indexOf('export function coaExplorerTxUrl'));
+  for (const needle of ['MEMO_PROGRAM_ID', 'numRequiredSignatures !== 1', 'instructions.length !== 1', 'programIdIndex !== 1', 'accounts', 'keys.length !== 2', 'memo']) {
+    assert.ok(guardBody.includes(needle), `assertMemoOnlyMessage no longer checks "${needle}"`);
+  }
+  // The port file holds no key material and nothing but the token, the types, the error and the one helper.
+  const port = stripComments(read(path.join(ROOT, COA_PUBLISHER_PORT_FILE)));
+  assert.doesNotMatch(port, /secret|generateKeyPair|Keypair|createPrivateKey|process\.env|\bfs\b/i, 'the COA publisher port must hold no key material');
+  assert.equal((port.match(/\.\s*signMessage\s*\(/g) ?? []).length, 1, 'exactly one signMessage call in the COA publisher port');
+  // No mainnet RPC URL literal and no key material anywhere under coa/anchor (the generic scans cover this too; this pins the directory).
+  const anchorFiles = listSourceFiles(path.join(API_SRC, 'coa/anchor'));
+  assert.ok(anchorFiles.length >= 6, 'coa/anchor scan covered too few files');
+  for (const f of anchorFiles) assert.doesNotMatch(stripComments(read(f)), /secret|Keypair|createPrivateKey|generateKeyPair/i, `${rel(f)} must not reference key material`);
 });
 
 // MoonPay's URL-signing secret may be named only in the provider and in the env config loader.

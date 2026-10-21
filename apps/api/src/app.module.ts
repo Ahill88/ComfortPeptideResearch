@@ -16,9 +16,11 @@ import { checkoutPortProviders, ReconciliationScheduler } from './wallet/wallet.
 import { CHAIN_PORT } from './wallet/checkout/ports';
 import { RefundsModule } from './wallet/refunds/refunds.module';
 import { SOLANA_CHAIN } from './wallet/wallet.tokens';
+import { CoaAnchorModule } from './coa/anchor/anchor.module';
 import { AdminCoreModule } from './admin/admin-core.module';
 import { AdminAuthModule } from './admin/auth/admin-auth.module';
 import { AdminOrdersModule } from './admin/orders/admin-orders.module';
+import { CoaModule } from './coa/coa.module';
 import { HealthModule } from './health/health.module';
 import { WalletAdminModule } from './wallet-admin/wallet-admin.module';
 import { assertValidEnv } from './config/env.validation';
@@ -61,6 +63,10 @@ import { isNonProductionRuntime } from './config/runtime';
     AdminCoreModule,
     AdminAuthModule,
     AdminOrdersModule,
+    // COA core + public verification API. Anchoring (COA_ANCHOR_PORT / COA_ANCHOR_INFO) is injected optionally from the global CoaAnchorModule.
+    CoaModule,
+    // On-chain COA anchoring (global; strict COA_ANCHOR_* config; the publisher signer is NOT bound here, see anchor.module.ts).
+    CoaAnchorModule,
     HealthModule,
   ],
   providers: [ReconciliationScheduler, { provide: APP_GUARD, useClass: RouteAwareThrottlerGuard }],

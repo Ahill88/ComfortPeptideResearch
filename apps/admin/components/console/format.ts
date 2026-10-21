@@ -49,3 +49,9 @@ export function utcLabel(iso: string | null | undefined): string {
   if (!iso || Number.isNaN(new Date(iso).getTime())) return '-';
   return UTC(iso);
 }
+
+/** UTC calendar date (YYYY-MM-DD) of an ISO timestamp, or a dash. */
+export function dateLabel(iso: string | null | undefined): string {
+  if (!iso || Number.isNaN(new Date(iso).getTime())) return '-';
+  return new Date(iso).toISOString().slice(0, 10);
+}

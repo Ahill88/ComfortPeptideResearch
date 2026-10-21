@@ -48,3 +48,37 @@ export interface AuditRow {
   ip: string | null;
   createdAt: string;
 }
+
+// ---- Lots and certificates of analysis (docs/api/coa-contract.md, ADMIN API)
+export type CoaListStatus = 'none' | 'draft' | 'published' | 'revoked';
+export type AnchorListStatus = 'none' | 'pending' | 'confirmed' | 'failed';
+export type CoaStatus = 'DRAFT' | 'PUBLISHED' | 'SUPERSEDED' | 'REVOKED';
+export type AnchorStatus = 'PENDING' | 'CONFIRMED' | 'FAILED';
+export type AnchorKind = 'PUBLISH' | 'REVOKE';
+
+export interface AdminProduct {
+  id: string; sku: string; slug: string; name: string; active: boolean; priceCents: number; inventory: number;
+  lotCount: number; publishedCoaLotCount: number;
+}
+
+export interface AdminLotSummary {
+  id: string; code: string; productId: string; productName: string; productSku: string; releasedAt: string | null;
+  currentCoaVersion: number | null; coaStatus: CoaListStatus; anchorStatus: AnchorListStatus;
+}
+
+export interface AdminAnchor {
+  status: AnchorStatus; network: string; txSignature: string | null; slot: number | null; blockTime: string | null;
+  attempts: number; error: string | null; memo: string; explorerUrl: string | null;
+}
+
+export interface AdminCoa {
+  id: string; lotId: string; version: number; status: CoaStatus;
+  labName: string; labReportId: string; testedAt: string; method: string; purityPercent: number; notes: string | null;
+  file: { name: string; sizeBytes: number; sha256: string };
+  createdBy: { name: string } | null; createdAt: string;
+  publishedBy: { name: string } | null; publishedAt: string | null;
+  revokedBy: { name: string } | null; revokedAt: string | null; revokeReason: string | null;
+  anchors: { publish: AdminAnchor | null; revoke: AdminAnchor | null };
+}
+
+export interface AdminLotDetail { lot: AdminLotSummary; coas: AdminCoa[] }

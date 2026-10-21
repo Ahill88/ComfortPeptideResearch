@@ -10,13 +10,16 @@ import { EnvLike, blank } from './runtime';
  * Every request counts against the "default" bucket (per client IP, shared across all routes). Requests to
  * money-moving or credential/enumeration-prone routes ALSO count against a stricter named bucket, again per
  * client IP and shared across the routes of that class. Exceeding any bucket yields HTTP 429 + Retry-After.
+ * The one exception is the unauthenticated COA verification surface (`/public/**`): it is read-only and meant to be
+ * opened by anyone, so it counts ONLY against its own, more generous `public` bucket (still per client IP) instead
+ * of the shared default one. That bucket exists to protect the database, not to stop a person browsing.
  *
  * Storage is the in-process memory store: counters are per API instance and reset on restart. Behind N
  * replicas the effective limit is up to N times higher until a shared (Redis) store is plugged in.
  */
 
 export const DEFAULT_BUCKET = 'default';
-export type StrictBucketName = 'money' | 'auth';
+export type StrictBucketName = 'money' | 'auth' | 'public';
 export type BucketName = typeof DEFAULT_BUCKET | StrictBucketName;
 
 export interface BucketLimit {
@@ -30,6 +33,8 @@ export const DEFAULT_RATE_LIMITS: RateLimitConfig = {
   default: { limit: 120, ttl: 60_000 },
   money: { limit: 10, ttl: 60_000 },
   auth: { limit: 20, ttl: 60_000 },
+  // Public COA verification pages: ~3 requests/second per IP is far above a person, far below a scraper.
+  public: { limit: 180, ttl: 60_000 },
 };
 
 /** Env var names that override each bucket's per-minute limit. */
@@ -37,6 +42,7 @@ export const RATE_LIMIT_ENV: Record<BucketName, string> = {
   default: 'THROTTLE_DEFAULT_LIMIT',
   money: 'THROTTLE_MONEY_LIMIT',
   auth: 'THROTTLE_AUTH_LIMIT',
+  public: 'THROTTLE_PUBLIC_LIMIT',
 };
 
 export function parsePositiveInt(raw: string | undefined): number | null {
@@ -51,7 +57,7 @@ export function loadRateLimitConfig(env: EnvLike = process.env): RateLimitConfig
     ttl: DEFAULT_RATE_LIMITS[name].ttl,
     limit: parsePositiveInt(env[RATE_LIMIT_ENV[name]]) ?? DEFAULT_RATE_LIMITS[name].limit,
   });
-  return { default: pick('default'), money: pick('money'), auth: pick('auth') };
+  return { default: pick('default'), money: pick('money'), auth: pick('auth'), public: pick('public') };
 }
 
 /**
@@ -76,10 +82,12 @@ export function routeSegments(rawPath: string | undefined): string[] {
  * switch cannot dodge the limit.
  *   money: wallet/transfers/**, wallet/checkout/:orderId/submit, wallet/onramp/**
  *   auth : auth/**, admin/auth/login, admin/auth/change-password
+ *   public: public/** (COA verification; replaces the default bucket for these routes, see the file header)
  */
 export function selectRateLimitBucket(rawPath: string | undefined): StrictBucketName | null {
   const [a, b, c, d, ...rest] = routeSegments(rawPath);
   if (a === 'auth') return 'auth';
+  if (a === 'public') return 'public';
   // Back-office sign-in and password change: guessable credentials, same strict per-IP bucket as customer auth.
   if (a === 'admin' && b === 'auth' && (c === 'login' || c === 'change-password')) return 'auth';
   if (a === 'wallet') {
@@ -124,6 +132,8 @@ export class RouteAwareThrottlerGuard extends ThrottlerGuard {
     const name = props.throttler.name ?? DEFAULT_BUCKET;
     // Strict buckets only apply to their own routes; the default bucket applies to everything.
     if (name !== DEFAULT_BUCKET && name !== bucket) return true;
+    // Public verification routes use their own bucket only (see the file header).
+    if (name === DEFAULT_BUCKET && bucket === 'public') return true;
     return super.handleRequest(props);
   }
 

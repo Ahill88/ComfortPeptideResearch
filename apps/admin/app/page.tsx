@@ -42,6 +42,8 @@ export default async function Overview() {
       <h2>Go to</h2>
       <ul className="link-list">
         <li><Link href="/orders">Fulfilment queue</Link></li>
+        <li><Link href="/lots">Lots &amp; COAs</Link></li>
+        <li><Link href="/products">Products</Link></li>
         <li><Link href="/wallets">Wallet reporting</Link></li>
         {auth.admin.role === 'OWNER' && <li><Link href="/team">Team</Link></li>}
         {auth.admin.role === 'OWNER' && <li><Link href="/audit">Audit log</Link></li>}

@@ -15,8 +15,12 @@ export function apiBase(): string {
 }
 
 interface Options {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'DELETE';
   body?: unknown;
+  /** Multipart upload (the runtime sets the boundary header). Mutually exclusive with `body`. */
+  form?: FormData;
+  /** Upload timeout override in ms (default 10 s). */
+  timeoutMs?: number;
   query?: Record<string, string | number | undefined | null>;
   /** Explicit token (used right after login, before the cookie exists). Defaults to the session cookie. */
   token?: string;
@@ -65,17 +69,17 @@ export async function callApi<T>(path: string, options: Options = {}): Promise<A
   }
   const method = options.method ?? 'GET';
   const headers: Record<string, string> = { accept: 'application/json', authorization: `Bearer ${token}` };
-  if (options.body !== undefined) headers['content-type'] = 'application/json';
+  if (options.body !== undefined && !options.form) headers['content-type'] = 'application/json';
 
   let response: Response;
   try {
     response = await fetch(url, {
       method,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      body: options.form ?? (options.body === undefined ? undefined : JSON.stringify(options.body)),
       cache: 'no-store',
       redirect: 'error',
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 10000),
     });
   } catch {
     return { ok: false, status: 503, kind: 'unavailable', message: FALLBACK.unavailable };
@@ -91,4 +95,27 @@ export async function callApi<T>(path: string, options: Options = {}): Promise<A
   }
   const kind = kindFor(response.status);
   return { ok: false, status: response.status, kind, message: await messageFrom(response, kind) };
+}
+
+/**
+ * Streams a binary admin resource (the COA PDF) without buffering it. Returns the upstream Response on success so the
+ * caller can pipe `body`; failures are mapped like callApi. The token stays on the server.
+ */
+export async function fetchStream(path: string): Promise<{ ok: true; response: Response } | ApiFailure> {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (!token) return { ok: false, status: 401, kind: 'unauthorized', message: FALLBACK.unauthorized };
+  let response: Response;
+  try {
+    response = await fetch(`${apiBase()}${path}`, {
+      headers: { accept: 'application/pdf', authorization: `Bearer ${token}` },
+      cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(30000),
+    });
+  } catch {
+    return { ok: false, status: 503, kind: 'unavailable', message: FALLBACK.unavailable };
+  }
+  if (response.ok && response.body) return { ok: true, response };
+  const kind = response.ok ? 'error' : kindFor(response.status);
+  return { ok: false, status: response.ok ? 502 : response.status, kind, message: response.ok ? FALLBACK.error : await messageFrom(response, kind) };
 }

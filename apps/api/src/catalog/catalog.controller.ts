@@ -38,6 +38,12 @@ class CatalogLotResponse {
 
   @ApiProperty({ format: 'date-time', example: '2025-01-15T00:00:00.000Z' })
   releasedAt!: string;
+
+  @ApiProperty({
+    description: 'True while this lot has a PUBLISHED certificate of analysis (see /v1/public/lots/{code}). With REQUIRE_PUBLISHED_COA=true only such lots are listed.',
+    example: true,
+  })
+  coaPublished!: boolean;
 }
 
 class CatalogProductResponse {

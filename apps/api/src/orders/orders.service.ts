@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { createHash } from 'node:crypto';
+import { isPublishedCoaRequired, lotsWithPublishedCoa } from '../coa/coa-requirement';
 import { PrismaService } from '../prisma.service';
 
 type Line = { productId: string; lotCode: string; quantity: number };
@@ -90,6 +91,14 @@ export class OrdersService {
     }, 0);
     if (!Number.isSafeInteger(total) || total > INT32_MAX) {
       throw new BadRequestException('Order total is too large');
+    }
+
+    // REQUIRE_PUBLISHED_COA=true: every ordered lot must currently have a PUBLISHED COA (same check the catalog uses).
+    if (isPublishedCoaRequired()) {
+      const published = await lotsWithPublishedCoa(this.prisma, input.items.map((item) => item.lotCode));
+      if (input.items.some((item) => !published.has(item.lotCode))) {
+        throw new BadRequestException('Unavailable product in order');
+      }
     }
 
     const customer = knownCustomer ?? (await this.resolveCustomer(email));
