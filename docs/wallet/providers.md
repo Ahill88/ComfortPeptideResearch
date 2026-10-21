@@ -113,3 +113,18 @@ Nothing here pays an order or credits a balance. Spendable comes only from the c
 Values must be whole numbers in range; anything else (and a max below the min) makes the API refuse to start rather than silently change what customers are asked to pay. Eligibility follows the same `ELIGIBILITY_REQUIRED` rule as checkout.
 
 Verification status: covered by unit tests (in-memory doubles) and by `tests/wallet/e2e.integration.test.ts` against real Postgres and the sandbox chain. Never exercised against the live MoonPay widget or a real devnet/mainnet cluster; whether MoonPay honors a pre-filled amount at or above its own minimum for every region and payment method is to be confirmed with provider.
+
+## Local devnet with platform-paid fees (development only)
+
+`pnpm dev:api` runs the API without a fee-payer signer, so with `WALLET_CHAIN_MODE=devnet` every customer pays the fee in SOL.
+To run the real API on Solana devnet with a throwaway devnet key bound as the fee payer (so a customer with 0 SOL can pay):
+
+```
+DEV_SPONSOR_KEYPAIR_FILE=/path/to/devnet-sponsor.json NODE_ENV=development \
+  pnpm --dir apps/api exec ts-node --project tsconfig.json --transpile-only ../../tools/dev/api-devnet-sponsored.ts
+```
+
+Needs `.env` with `WALLET_CHAIN_MODE=devnet`, `FEE_SPONSORSHIP=true`, a local `DATABASE_URL`, and a devnet-funded sponsor key
+(at least `FEE_SPONSOR_MIN_LAMPORTS`, default 0.05 SOL). The launcher (`tools/dev/api-devnet-sponsored.ts`) refuses to start
+outside `NODE_ENV=development`, on a non-devnet RPC or a non-local database. It lives outside `apps/api/src` on purpose: the API
+never holds key material. Production binds a KMS/HSM signer under the same `FEE_PAYER_SIGNER` token instead.
