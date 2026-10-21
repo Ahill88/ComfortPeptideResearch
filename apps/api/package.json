@@ -6,6 +6,7 @@
     "start:dev": "NODE_ENV=development nest start --watch",
     "build": "nest build",
     "lint": "tsc --noEmit",
+    "admin:create": "ts-node --project tsconfig.json --transpile-only scripts/create-admin.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev"
   },

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { ConflictException } from '@nestjs/common';
-import { computeRequestHash, normalizeEmail, OrdersService, INT32_MAX } from '../orders.service';
+import { computeRequestHash, normalizeEmail, OrdersService, INT32_MAX, MAX_SHIPPING_ADDRESS_LENGTH } from '../orders.service';
 import { createInMemoryPrisma, Product } from './in-memory-prisma';
 
 const productA: Product = { id: 'product-a', priceCents: 1250, active: true, lots: [{ code: 'LOT-A' }] };
@@ -193,4 +193,33 @@ test('two lines for the same product with different lots are accepted', async ()
   );
   assert.equal(order.totalCents, 1200);
   assert.equal(order.items.length, 2);
+});
+
+test('the shipping address is persisted trimmed, never exposed on the public response, and the hash still uses the address as sent', async () => {
+  const { service, state } = setup();
+  const sent = '  1 Lab Way,\nBoston, MA 02110  ';
+  const order = await service.create(request({ shippingAddress: sent }));
+  assert.equal(state.orders[0].shippingAddress, '1 Lab Way,\nBoston, MA 02110');
+  assert.ok(!('shippingAddress' in order));
+  assert.ok(!JSON.stringify(order).includes('Boston'));
+  assert.equal(state.orders[0].requestHash, computeRequestHash({ ...request({ shippingAddress: sent }), email: 'researcher@example.test' } as never));
+  // Same bytes replay to the same order; a whitespace-only difference is, as before, a different request.
+  assert.equal((await service.create(request({ shippingAddress: sent }))).id, order.id);
+  await assert.rejects(service.create(request({ shippingAddress: sent.trim() })), ConflictException);
+  assert.equal(state.orders.length, 1);
+});
+
+test('a blank, missing, non-string or over-long shipping address is a 400 that creates nothing', async () => {
+  const { service, state } = setup();
+  for (const shippingAddress of ['', '   \n\t ', undefined, null, 42, {}]) {
+    await assert.rejects(service.create(request({ shippingAddress })), /A shipping address is required/, String(shippingAddress));
+  }
+  await assert.rejects(service.create(request({ shippingAddress: 'x'.repeat(MAX_SHIPPING_ADDRESS_LENGTH + 1) })), /at most 500 characters/);
+  // The limit applies to the trimmed text.
+  await assert.rejects(service.create(request({ shippingAddress: `${'x'.repeat(MAX_SHIPPING_ADDRESS_LENGTH)}y` })), /at most 500/);
+  assert.equal(state.orders.length, 0);
+  assert.equal(state.customers.length, 0);
+  const exact = await service.create(request({ shippingAddress: `  ${'x'.repeat(MAX_SHIPPING_ADDRESS_LENGTH)}  ` }));
+  assert.ok(exact.id);
+  assert.equal(state.orders[0].shippingAddress.length, 500);
 });

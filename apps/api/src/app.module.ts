@@ -17,6 +17,8 @@ import { CHAIN_PORT } from './wallet/checkout/ports';
 import { RefundsModule } from './wallet/refunds/refunds.module';
 import { SOLANA_CHAIN } from './wallet/wallet.tokens';
 import { AdminCoreModule } from './admin/admin-core.module';
+import { AdminAuthModule } from './admin/auth/admin-auth.module';
+import { AdminOrdersModule } from './admin/orders/admin-orders.module';
 import { HealthModule } from './health/health.module';
 import { WalletAdminModule } from './wallet-admin/wallet-admin.module';
 import { assertValidEnv } from './config/env.validation';
@@ -57,6 +59,8 @@ import { isNonProductionRuntime } from './config/runtime';
     // this repo, so POST /admin/refunds/:id/submit fails closed with 503. Bind a KMS/HSM-backed signer here later.
     RefundsModule.register({ imports: [WalletModule], providers: [{ provide: CHAIN_PORT, useExisting: SOLANA_CHAIN }] }),
     AdminCoreModule,
+    AdminAuthModule,
+    AdminOrdersModule,
     HealthModule,
   ],
   providers: [ReconciliationScheduler, { provide: APP_GUARD, useClass: RouteAwareThrottlerGuard }],

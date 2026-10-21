@@ -40,6 +40,8 @@ Limits (violations are `400`, never `500`):
 | order total | at most 2,147,483,647 cents (PostgreSQL `INT4`) |
 | `researchUseAcknowledged` | must be `true` |
 
+`shippingAddress` (required free text, 1-500 characters after trimming) is now persisted trimmed on `Order.shippingAddress`; this public API never returns it, only the admin fulfillment API (`docs/api/admin-orders.md`) does.
+
 `email` is trimmed and lowercased, the same normalization as the wallet code, so one address is one customer.
 
 ## Response

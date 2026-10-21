@@ -16,6 +16,8 @@ export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/;
 export const INT32_MAX = 2_147_483_647;
 export const MAX_QUANTITY_PER_LINE = 1000;
 export const MAX_ORDER_LINES = 50;
+/** The customer types the address as free text; we only require it to be present (after trimming) and bounded. */
+export const MAX_SHIPPING_ADDRESS_LENGTH = 500;
 export const IDEMPOTENCY_CONFLICT_MESSAGE = 'Idempotency key was already used with a different request';
 
 /** Same normalization as WalletService.resolveCustomer so one email maps to one Customer everywhere. */
@@ -97,6 +99,9 @@ export class OrdersService {
           customerId: customer.id,
           idempotencyKey: input.idempotencyKey,
           requestHash,
+          // Stored trimmed for the person packing the parcel. The requestHash above is deliberately computed from the
+          // address exactly as sent, so idempotency semantics are unchanged.
+          shippingAddress: input.shippingAddress.trim(),
           totalCents: total,
           researchAcknowledgedAt: new Date(),
           items: {
@@ -131,6 +136,12 @@ export class OrdersService {
     }
     if (typeof input.email !== 'string' || !normalizeEmail(input.email)) {
       throw new BadRequestException('A valid email is required');
+    }
+    if (typeof input.shippingAddress !== 'string' || !input.shippingAddress.trim()) {
+      throw new BadRequestException('A shipping address is required');
+    }
+    if (input.shippingAddress.trim().length > MAX_SHIPPING_ADDRESS_LENGTH) {
+      throw new BadRequestException(`Shipping address must be at most ${MAX_SHIPPING_ADDRESS_LENGTH} characters`);
     }
     if (typeof input.idempotencyKey !== 'string' || !IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)) {
       throw new BadRequestException(

@@ -6,7 +6,8 @@
 #
 # The admin app does not set `output: 'standalone'`, so the runtime image runs `next start` against the built .next.
 # Runtime configuration (server-side only, never baked into the image): API_URL (e.g. http://api:3001/v1) and
-# ADMIN_API_TOKEN. ADMIN_DEV_SESSION is a development-only bypass and must NOT be set in any deployed environment.
+# ADMIN_API_TOKEN (wallet reporting only). Sign-in uses the API's admin auth; the session cookie is Secure in production,
+# so serve the admin over HTTPS (a reverse proxy is fine). There is no development-session bypass any more.
 
 ARG NODE_VERSION=22
 ARG PNPM_VERSION=12.14.0

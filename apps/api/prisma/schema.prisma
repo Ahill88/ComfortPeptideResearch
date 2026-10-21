@@ -282,6 +282,8 @@ model AdminUser {
   failedLogins Int @default(0)
   lockedUntil DateTime?
   lastLoginAt DateTime?
+  // Highest TOTP time step already accepted for this admin (replay protection).
+  lastTotpStep Int?
   createdAt DateTime @default(now())
   sessions AdminSession[]
   auditEvents AdminAuditEvent[]

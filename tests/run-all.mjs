@@ -36,11 +36,24 @@ const skipped = hasDatabase ? [] : allSuites.filter(isIntegration);
 const suites = allSuites.filter((file) => !skipped.includes(file));
 for (const file of skipped) console.log(`SKIP  ${relative(root, file)}  (set TEST_DATABASE_URL to run)`);
 
+// Suites that must not run against the shared `public`/`dev` schemas (they deactivate other admins, etc.) get their own scratch
+// schema, created and migrated on demand in the same local database.
+const SCRATCH_SCHEMA_SUITES = new Map([['admin-auth.integration.test.ts', 'it_admin_auth']]);
+function scratchEnv(file) {
+  const name = [...SCRATCH_SCHEMA_SUITES].find(([suffix]) => file.endsWith(suffix))?.[1];
+  if (!name || !process.env.TEST_DATABASE_URL) return {};
+  const url = new URL(process.env.TEST_DATABASE_URL);
+  url.searchParams.set('schema', name);
+  const migrate = spawnSync('pnpm', ['--dir', api, 'exec', 'prisma', 'migrate', 'deploy'], { encoding: 'utf8', env: { ...process.env, DATABASE_URL: url.toString() } });
+  if (migrate.status !== 0) console.log(`        could not prepare scratch schema ${name}: ${(migrate.stderr || migrate.stdout).slice(-300)}`);
+  return { TEST_DATABASE_URL: url.toString(), DATABASE_URL: url.toString() };
+}
+
 let pass = 0;
 let fail = 0;
 const failedSuites = [];
 for (const file of suites) {
-  const run = spawnSync('pnpm', ['--dir', api, 'exec', 'ts-node', '--project', 'tsconfig.json', '--transpile-only', file], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test' } });
+  const run = spawnSync('pnpm', ['--dir', api, 'exec', 'ts-node', '--project', 'tsconfig.json', '--transpile-only', file], { encoding: 'utf8', env: { ...process.env, NODE_ENV: 'test', ...scratchEnv(file) } });
   const output = `${run.stdout}${run.stderr}`;
   const p = Number(/^ℹ pass (\d+)/m.exec(output)?.[1] ?? 0);
   const f = Number(/^ℹ fail (\d+)/m.exec(output)?.[1] ?? 0);

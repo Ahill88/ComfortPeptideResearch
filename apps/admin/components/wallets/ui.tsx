@@ -3,6 +3,8 @@ import styles from './wallets.module.css';
 import { badgeTone } from './format';
 import { WALLET_SECTIONS } from './sections';
 import type { ApiResult } from './api';
+import { Shell } from '../console/shell';
+import { requireSession } from '../../lib/server/session';
 
 export const READ_ONLY_NOTICE = 'Read-only. Administrators cannot sign, move, or control customer wallets.';
 
@@ -17,56 +19,35 @@ export function ReadOnlyNotice() {
   );
 }
 
-export function WalletsShell({ active, children }: { active: string; children: ReactNode }) {
+/** Wallet pages share the console shell. The session was already verified by requireAdminSession() (memoised per request). */
+export async function WalletsShell({ active, children }: { active: string; children: ReactNode }) {
   const section = WALLET_SECTIONS.find((candidate) => candidate.slug === active) ?? WALLET_SECTIONS[0];
+  const auth = await requireSession();
   return (
-    <main className="shell">
-      <aside className="sidebar">
-        <a className="brand" href="/" aria-label="Helix and Field operations home">
-          <span className="brand-mark">H/F</span>
-          <span>Helix &amp; Field<small>Operations</small></span>
-        </a>
+    <Shell auth={auth} active="wallets">
+      <div className={styles.heading}>
+        <p className="eyebrow">Wallet operations</p>
+        <h1>{section.title}</h1>
+        <p className="subtitle">{section.description}</p>
+      </div>
 
-        <nav className="nav" aria-label="Primary navigation">
-          <a className="nav-link" href="/"><span>01</span>Overview</a>
-          <a className="nav-link active" href="/wallets" aria-current="page"><span>02</span>Wallets</a>
-        </nav>
+      <ReadOnlyNotice />
 
-        <div className="sidebar-footer">
-          Read-only reporting
-          <small>No signing or fund movement</small>
-        </div>
-      </aside>
+      <nav className={styles.tabs} aria-label="Wallet sections">
+        {WALLET_SECTIONS.map((item) => (
+          <a
+            key={item.slug}
+            href={item.href}
+            className={`${styles.tab} ${item.slug === active ? styles.tabActive : ''}`}
+            aria-current={item.slug === active ? 'page' : undefined}
+          >
+            {item.label}
+          </a>
+        ))}
+      </nav>
 
-      <section className="content">
-        <header className="topbar">
-          <p className="eyebrow">Workspace / wallets / {section.label}</p>
-        </header>
-
-        <div className={styles.heading}>
-          <p className="eyebrow">Wallet operations</p>
-          <h1>{section.title}</h1>
-          <p className="subtitle">{section.description}</p>
-        </div>
-
-        <ReadOnlyNotice />
-
-        <nav className={styles.tabs} aria-label="Wallet sections">
-          {WALLET_SECTIONS.map((item) => (
-            <a
-              key={item.slug}
-              href={item.href}
-              className={`${styles.tab} ${item.slug === active ? styles.tabActive : ''}`}
-              aria-current={item.slug === active ? 'page' : undefined}
-            >
-              {item.label}
-            </a>
-          ))}
-        </nav>
-
-        <div id="wallet-content">{children}</div>
-      </section>
-    </main>
+      <div id="wallet-content">{children}</div>
+    </Shell>
   );
 }
 

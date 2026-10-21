@@ -240,3 +240,30 @@ test('email is normalized consistently: differently-cased emails are one custome
   assert.equal(first.body.customerId, second.body.customerId);
   assert.equal(await prisma.customer.count({ where: { email: to } }), 1);
 });
+
+test('the shipping address is stored trimmed on the order row but is not on the public response', async () => {
+  const to = track('address');
+  const res = await post(payload(to, { shippingAddress: '  9 Packing Lane\nSpringfield, IL 62701  ' }), `${tag}-address-key`);
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  assert.ok(!('shippingAddress' in res.body));
+  assert.ok(!JSON.stringify(res.body).includes('Packing'));
+  const row = await prisma.order.findUniqueOrThrow({ where: { id: res.body.id } });
+  assert.equal(row.shippingAddress, '9 Packing Lane\nSpringfield, IL 62701');
+  // A replay returns the same order and leaves the stored address alone.
+  const replay = await post(payload(to, { shippingAddress: '  9 Packing Lane\nSpringfield, IL 62701  ' }), `${tag}-address-key`);
+  assert.equal(replay.body.id, res.body.id);
+  assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: res.body.id } })).shippingAddress, row.shippingAddress);
+});
+
+test('blank, missing, non-string and over-500 shipping addresses are 400 and create nothing; exactly 500 is accepted', async () => {
+  const to = track('address-bad');
+  let n = 0;
+  for (const shippingAddress of ['', '    ', undefined, null, 12345, 'x'.repeat(501)]) {
+    const res = await post(payload(to, { shippingAddress }), `${tag}-addr-bad-${n++}`);
+    assert.equal(res.status, 400, `${JSON.stringify(shippingAddress)?.slice(0, 20)}: ${JSON.stringify(res.body)}`);
+  }
+  assert.equal((await ordersFor(to)).length, 0);
+  const ok = await post(payload(to, { shippingAddress: 'y'.repeat(500) }), `${tag}-addr-max`);
+  assert.equal(ok.status, 201, JSON.stringify(ok.body));
+  assert.equal((await prisma.order.findUniqueOrThrow({ where: { id: ok.body.id } })).shippingAddress?.length, 500);
+});

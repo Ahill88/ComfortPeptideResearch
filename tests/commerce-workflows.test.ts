@@ -52,6 +52,8 @@ test('cart arithmetic persists the product price and summed quantity total in ce
   // The client-chosen key is bookkeeping only; it is never used as the global Order.id.
   assert.equal(createdOrders[0].id, undefined);
   assert.equal(createdOrders[0].idempotencyKey, 'order-cart-arithmetic');
+  // The address is stored (trimmed) so the order can actually be shipped.
+  assert.equal(createdOrders[0].shippingAddress, '1 Lab Way');
   assert.match(createdOrders[0].requestHash, /^[0-9a-f]{64}$/);
 });
 
@@ -67,6 +69,17 @@ test('cart rejects an unavailable product and a lot that does not belong to the 
     invalidLot.create({ email: 'researcher@example.test', shippingAddress: '1 Lab Way', items: [{ productId: 'product-a', lotCode: 'LOT-OTHER', quantity: 1 }], researchUseAcknowledged: true, idempotencyKey: 'order-invalid-lot' }),
     /Invalid lot/,
   );
+});
+
+test('cart persists the trimmed shipping address and rejects a blank or over-long one before touching the database', async () => {
+  const { service, createdOrders } = createOrdersService();
+  const base = { email: 'researcher@example.test', items: [{ productId: 'product-a', lotCode: 'LOT-A', quantity: 1 }], researchUseAcknowledged: true as const };
+  const created = await service.create({ ...base, shippingAddress: '  1 Lab Way, Boston  ', idempotencyKey: 'order-address-trimmed' });
+  assert.equal(createdOrders[0].shippingAddress, '1 Lab Way, Boston');
+  assert.ok(!('shippingAddress' in created), 'public order response must not expose the address');
+  await assert.rejects(service.create({ ...base, shippingAddress: '   ', idempotencyKey: 'order-address-blank' }), /shipping address is required/);
+  await assert.rejects(service.create({ ...base, shippingAddress: 'x'.repeat(501), idempotencyKey: 'order-address-long' }), /at most 500/);
+  assert.equal(createdOrders.length, 1);
 });
 
 test('cart requires research-use acknowledgement', async () => {

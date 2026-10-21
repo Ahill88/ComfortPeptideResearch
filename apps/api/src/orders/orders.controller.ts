@@ -11,7 +11,7 @@ import {
 } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import { ArrayMaxSize, ArrayMinSize, Equals, IsArray, IsBoolean, IsEmail, IsInt, IsOptional, IsString, Matches, Max, Min, ValidateNested } from 'class-validator';
-import { MAX_ORDER_LINES, MAX_QUANTITY_PER_LINE, OrdersService } from './orders.service';
+import { MAX_ORDER_LINES, MAX_QUANTITY_PER_LINE, MAX_SHIPPING_ADDRESS_LENGTH, OrdersService } from './orders.service';
 
 class ApiErrorResponse {
   @ApiProperty({ example: 400 })
@@ -46,7 +46,12 @@ class CreateOrder {
   @IsEmail()
   email!: string;
 
-  @ApiProperty({ description: 'Shipping address supplied by the customer.', example: '123 Research Way, Boston, MA 02110, US' })
+  @ApiProperty({
+    description: 'Shipping address as free text. Stored (trimmed) so the order can be shipped; never returned by this public API.',
+    example: '123 Research Way, Boston, MA 02110, US',
+    minLength: 1,
+    maxLength: MAX_SHIPPING_ADDRESS_LENGTH,
+  })
   @IsString()
   shippingAddress!: string;
 
@@ -145,7 +150,7 @@ export class OrdersController {
   @ApiCreatedResponse({ description: 'Order created, or the order this customer previously created with the same idempotency key and payload.', type: OrderResponse })
   @ApiConflictResponse({ description: 'The idempotency key was already used by this customer with a different request.', type: ApiErrorResponse })
   @ApiBadRequestResponse({
-    description: 'The request is invalid, omits research-use acknowledgement or an idempotency key, has no items, has more than 50 lines, has a quantity outside 1-1000, has a total above the 32-bit cents limit, references an inactive or unavailable product, or assigns a lot to the wrong product.',
+    description: 'The request is invalid, omits research-use acknowledgement or an idempotency key, has a blank shipping address or one over 500 characters, has no items, has more than 50 lines, has a quantity outside 1-1000, has a total above the 32-bit cents limit, references an inactive or unavailable product, or assigns a lot to the wrong product.',
     type: ApiErrorResponse,
   })
   create(@Body() body: CreateOrder, @Headers('idempotency-key') headerKey?: string | string[]) {

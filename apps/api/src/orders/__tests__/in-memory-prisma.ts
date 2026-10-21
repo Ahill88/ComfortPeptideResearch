@@ -54,6 +54,7 @@ export function createInMemoryPrisma(seedProducts: Product[] = []) {
           customerId: data.customerId,
           idempotencyKey: data.idempotencyKey,
           requestHash: data.requestHash,
+          shippingAddress: data.shippingAddress ?? null,
           status: 'PENDING_PAYMENT',
           totalCents: data.totalCents,
           currency: 'USD',

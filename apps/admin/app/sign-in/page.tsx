@@ -1,29 +1,28 @@
+import { redirect } from 'next/navigation';
+import { loadSession } from '../../lib/server/session';
 import SignInForm from './sign-in-form';
 
-export default function SignIn() {
-  const developmentSessionEnabled =
-    process.env.NODE_ENV === 'development' &&
-    process.env.ADMIN_DEV_SESSION === 'enabled';
+export const dynamic = 'force-dynamic';
+export const metadata = { title: 'Sign in - Helix & Field Operations' };
+
+const NOTICES: Record<string, { kind: 'info' | 'warn'; text: string }> = {
+  expired: { kind: 'warn', text: 'Your session expired. Sign in again to continue.' },
+  'signed-out': { kind: 'info', text: 'You have been signed out.' },
+};
+
+export default async function SignIn({ searchParams }: { searchParams: Promise<Record<string, string | string[] | undefined>> }) {
+  if ((await loadSession()).state === 'ok') redirect('/');
+  const reason = (await searchParams).reason;
+  const notice = typeof reason === 'string' ? NOTICES[reason] : undefined;
 
   return (
     <main className="access-page">
       <section className="access-panel" aria-labelledby="access-title">
         <p className="eyebrow">Helix &amp; Field / Operations</p>
-        <h1 id="access-title">Access denied</h1>
-        {developmentSessionEnabled ? (
-          <>
-            <p>This local development workspace requires an explicit development admin session.</p>
-            <SignInForm />
-          </>
-        ) : (
-          <p>Operational dashboard access is not configured for this environment.</p>
-        )}
-        <p className="access-note">
-          Local development only: set <code>ADMIN_DEV_SESSION=enabled</code> in your local environment, then restart the app.
-        </p>
-        <p className="access-note">
-          Production requires identity-provider authentication, server-verified operational RBAC, and MFA before this dashboard can be enabled.
-        </p>
+        <h1 id="access-title">Sign in</h1>
+        {notice && <p className={`msg msg-${notice.kind}`} role="status">{notice.text}</p>}
+        <SignInForm />
+        <p className="access-note">Staff and owner accounts only. Accounts are created by an owner.</p>
       </section>
     </main>
   );

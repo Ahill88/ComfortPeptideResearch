@@ -75,11 +75,13 @@ export function routeSegments(rawPath: string | undefined): string[] {
  * Which strict bucket (if any) a request path belongs to. HTTP method is deliberately ignored so a verb
  * switch cannot dodge the limit.
  *   money: wallet/transfers/**, wallet/checkout/:orderId/submit, wallet/onramp/**
- *   auth : auth/**
+ *   auth : auth/**, admin/auth/login, admin/auth/change-password
  */
 export function selectRateLimitBucket(rawPath: string | undefined): StrictBucketName | null {
   const [a, b, c, d, ...rest] = routeSegments(rawPath);
   if (a === 'auth') return 'auth';
+  // Back-office sign-in and password change: guessable credentials, same strict per-IP bucket as customer auth.
+  if (a === 'admin' && b === 'auth' && (c === 'login' || c === 'change-password')) return 'auth';
   if (a === 'wallet') {
     if (b === 'transfers') return 'money';
     if (b === 'onramp') return 'money';
