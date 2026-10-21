@@ -46,7 +46,7 @@ Even when 1-3 hold, wording such as "non-custodial" should be used in the UI onl
 - **Privy as it exists today.** It is a descriptor only (`wallet-providers.ts`); there is no Privy SDK, no embedded wallet creation, and the storefront offers only the sandbox provider. If `PRIVY_APP_ID` is set, `POST /v1/wallet` accepts `provider: "privy"` with any valid address and **nothing verifies that the address was issued by Privy**. Its disclosure and `recoverySupported`/`exportSupported: false` say so. Do not set `PRIVY_APP_ID` in a deployment and treat the result as a Privy wallet.
 - **Any service-controlled wallet.** A wallet whose key the platform or a vendor acting for the platform can use without a per-action customer signature is not to be described as non-custodial, whatever the vendor calls it.
 - **A fee-payer key or delegated signing** changes the "no platform signing" property (see `providers.md` and `delegated-payments.md`). Each needs its own assessment. Neither exists today.
-- **The merchant treasury key.** It is a platform-controlled key by design once refunds exist. It must only be used for refunds (see `architecture.md`) and never to move customer-wallet funds. Refunds are not implemented and no treasury key is held by the platform today.
+- **The merchant treasury key.** It is a platform-controlled key by design once refunds exist. It must only be used for refunds (see `architecture.md`) and never to move customer-wallet funds. The refunds module is mounted but no signer implementation ships, so no treasury key is held by the platform today.
 
 ## Other facts relevant to the custody and compliance analysis
 

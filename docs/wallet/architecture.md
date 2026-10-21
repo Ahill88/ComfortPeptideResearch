@@ -107,7 +107,7 @@ Mainnet is not usable as coded: `VerificationService.expectedMint` returns a val
 - **Default `ComplianceScreen` (`AllowAllComplianceScreen`) allows everything: no sanctions screening exists.** No withdrawal limits exist beyond spendable. Bind `COMPLIANCE_SCREEN` to a real provider before enabling external sends anywhere real.
 
 ### 6. Refunds
-Refunds are **not implemented**. `CryptoTxType.REFUND` exists only as an enum value; no code creates or signs a refund. Until a refund path exists, refunds are an off-platform manual process, and checkout failure paths that may have moved funds (mismatched or over/under payment, order no longer payable) record `FAILED` with a reason and a `manualReview` audit flag for an operator to act on.
+`RefundsModule` (`apps/api/src/wallet/refunds`, admin-token only: `POST /v1/admin/refunds/request`, `/:id/submit`, `/:id/verify`, `GET /v1/admin/refunds`) is mounted, but **no `MERCHANT_SIGNER` implementation ships**, so submit fails closed with 503. Until a KMS/HSM-backed signer is bound, refunds remain an off-platform manual process, and checkout failure paths that may have moved funds (mismatched or over/under payment, order no longer payable) record `FAILED` with a reason and a `manualReview` audit flag for an operator to act on.
 
 A refund would be a **new, merchant-signed USDC transfer from the merchant treasury**. It never debits a customer wallet (the platform has no authority to). Required design, **not built**:
 
@@ -144,7 +144,7 @@ Note that adding this signing service changes the "platform has no signing code 
 | Prepared message stores | `InMemoryPreparedTransactionStore` (transfers, token `PREPARED_TX_STORE` in `wallet.module.ts`) and `InMemoryPreparedMessageStore` (checkout, token `PREPARED_MESSAGE_STORE` in `checkout.module.ts`). Lost on restart and not shared between instances; submit fails closed and the customer re-prepares. A persistent shared store is required for more than one instance. |
 | Reservation lock | `KeyedLock` in `checkout.util.ts` is per process. Cross-process safety relies on the unique `CreditReservation.orderId` and compare-and-set updates, which no test has run against Postgres. |
 | Fulfillment | No-op behind `ENABLE_LIVE_FULFILLMENT`. |
-| Refunds | Not implemented. |
+| Refunds | Module mounted; request/verify work, submit returns 503 until a `MERCHANT_SIGNER` is bound (none ships). |
 
 ## Failure modes
 

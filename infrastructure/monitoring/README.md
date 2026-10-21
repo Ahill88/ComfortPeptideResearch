@@ -22,7 +22,7 @@ dependency of `next`; it is not installed or used by this code.) Therefore:
 - No OpenTelemetry SDK, auto-instrumentation, tracing, or OTLP exporter in api, storefront or admin.
 - No metrics endpoint (`/metrics`), no RED/USE metrics, no business metrics (orders, wallet reservations, reconcile lag).
 - No error tracking (Sentry or similar) and no uptime/synthetic checks.
-- No `/health` or `/ready` route in the API. The container probe only checks that the HTTP port answers.
+- The API has `GET /health` (liveness) and `GET /health/ready` (Postgres `SELECT 1` only; Redis is not checked). The container probe uses `/health`.
 - No request/trace correlation id on logs (no `genReqId`, no `x-request-id` propagation), and no log correlation between
   storefront -> api -> database.
 - No logging configuration in the Next.js apps beyond Next's defaults.
@@ -48,7 +48,7 @@ Tracing and metrics (OpenTelemetry)
   loop duration and last-success timestamp, Redis/Postgres connectivity.
 
 Health
-- `GET /health/live` (process up) and `GET /health/ready` (Postgres `SELECT 1` and Redis `PING`), unauthenticated,
+- Implemented: `GET /health` (process up) and `GET /health/ready` (Postgres `SELECT 1`; still to add: Redis `PING`), unauthenticated,
   no sensitive detail. Point ALB target groups and container probes at them.
 
 Alerts (minimum)

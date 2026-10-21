@@ -84,5 +84,5 @@ refuses any database that is not on `localhost`/`127.0.0.1` with `helix` or `tes
    `migrate deploy`. To slim it: move `prisma` to `dependencies`, then try `pnpm deploy --prod`, and verify with a build.
 4. **corepack + pnpm 12.14.0**: relies on the Node 22 image shipping corepack and corepack being able to fetch this
    pnpm version. Unverified.
-5. **API health check is liveness only** (`GET /docs`, any non-5xx). There is no `/health` route yet.
+5. **API health check is liveness only** (`GET /health`, 200). `GET /health/ready` (Postgres `SELECT 1`, 503 on failure) is available for readiness; Redis is not checked. Both are unprefixed (no `/v1`).
 6. Filtered `pnpm install --frozen-lockfile --filter "...<pkg>..."` and the BuildKit cache mount were not exercised.

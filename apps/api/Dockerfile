@@ -58,10 +58,9 @@ COPY --chown=node:node apps/api/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod 0755 docker-entrypoint.sh
 USER node
 EXPOSE 3001
-# The API has no dedicated health route yet. This probe GETs /docs and accepts any non-5xx answer (200 when Swagger is
-# enabled; 404 when docs are disabled in a production-like runtime). It proves only that the HTTP server is accepting
-# connections (liveness), NOT that Postgres/Redis are reachable (readiness). A real /health route is a TODO for the API.
+# Liveness probe: GET /health (always 200 while the process serves HTTP; it does not touch Postgres/Redis so a database
+# blip never restarts the container). Use GET /health/ready (Postgres SELECT 1, 503 on failure) for orchestrator readiness.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["node", "-e", "require('http').get({host:'127.0.0.1',port:process.env.PORT||3001,path:'/docs',timeout:4000},r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"]
+    CMD ["node", "-e", "require('http').get({host:'127.0.0.1',port:process.env.PORT||3001,path:'/health',timeout:4000},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["node", "dist/main.js"]

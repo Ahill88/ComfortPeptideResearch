@@ -3,6 +3,7 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { configureApp } from './config/configure-app';
 import { EnvValidationError, assertValidEnv } from './config/env.validation';
+import { HEALTH_PREFIX_EXCLUDE } from './health/health.module';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -13,7 +14,8 @@ async function bootstrap() {
   for (const warning of assertValidEnv(process.env)) logger.warn(warning);
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
-  app.setGlobalPrefix('v1');
+  // Liveness/readiness probes stay unprefixed (/health, /health/ready) so orchestrators need no knowledge of the API version.
+  app.setGlobalPrefix('v1', { exclude: HEALTH_PREFIX_EXCLUDE });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   const { docs, trustProxy } = configureApp(app, process.env);
   const port = Number(process.env.PORT?.trim() || 3001);

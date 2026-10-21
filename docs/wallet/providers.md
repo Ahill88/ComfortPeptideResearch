@@ -82,7 +82,8 @@ A Solana transfer needs SOL for network fees (and possibly for creating a recipi
 | `PRIVY_APP_ID` | API (`wallet.config.ts`) | In `.env.example`; only flips the Privy descriptor to active. Privy server secret: not in `.env.example`, not read by code; name to be confirmed with provider |
 | `MOONPAY_PUBLISHABLE_KEY`, `MOONPAY_SECRET_KEY` | API only (the storefront never receives them) | In `.env.example`, blank |
 | `SOLANA_USDC_TREASURY` | API (checkout, wallet, on-ramp checks; legacy payments) | In `.env.example`, empty. Checkout prepare returns 503 until set. |
-| `PAYMENT_VERIFICATION_MODE` | Nothing | In `.env.example` as `disabled`; **no code reads it** |
+| `WALLET_LINK_CHALLENGE_KEY` | API (`wallet/link-proof.ts`) | In `.env.example`, blank; >= 32 chars required outside development/test |
+| `ELIGIBILITY_REQUIRED` | API (`checkout.service.ts`) | In `.env.example` as `true`; `false` honored only in development/test |
 | Five `ENABLE_*` flags | API (`contracts.ts`) | In `.env.example`, all `false` |
 | `WALLET_CHAIN_MODE`, `SOLANA_NETWORK`, `SOLANA_RPC_URL`, `SOLANA_USDC_MINT` | API (`wallet.config.ts`) | In `.env.example` (`sandbox`, `solana-devnet`, devnet URL, blank) |
 | `SOLANA_USDC_MAINNET_MINT` | API checkout only (`checkout/ports.ts`) | **Not** in `.env.example` |

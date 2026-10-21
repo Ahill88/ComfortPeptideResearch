@@ -16,7 +16,7 @@
   mode), and `ADMIN_API_TOKEN` of at least 32 characters when set.
 - Session validation for account endpoints is deny-all in production until a real server-issued session validator exists.
 - Privy embedded wallets are a descriptor only; do not configure `PRIVY_APP_ID` and call it a Privy integration.
-- There is no `/health` route and no OpenTelemetry (see `../monitoring/README.md`).
+- `/health` (liveness) and `/health/ready` (Postgres readiness) exist; there is no OpenTelemetry (see `../monitoring/README.md`).
 - The Docker images have never been built (see `../docker/README.md`).
 
 Treat anything below as a staging/sandbox target at most (`WALLET_CHAIN_MODE=devnet`, flags false), and only once the
@@ -68,7 +68,7 @@ second control in front of it.
    drift (`prisma migrate diff --exit-code`).
 8. **Services.** One ECS service per app, `desiredCount >= 2` for api/storefront once non-sandbox, rolling deploy with
    circuit breaker. Container health checks are already defined in the images; ALB target-group health check paths:
-   storefront `/`, admin `/` (accept 3xx), api `/docs` or a future `/health` (liveness only today).
+   storefront `/`, admin `/` (accept 3xx), api `/health` (liveness) or `/health/ready` (Postgres).
 9. **Logging/metrics.** Ship stdout to CloudWatch Logs; see `../monitoring/README.md` for what exists and what does not.
 10. **CI/CD.** `.github/workflows/ci.yml` builds, lints, tests and scans but does **not** deploy or push images. Adding
     deploy requires GitHub OIDC -> an IAM role (no long-lived AWS keys) and a protected `environment` with reviewers.

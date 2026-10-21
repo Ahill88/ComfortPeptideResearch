@@ -33,13 +33,13 @@ All five flags default to off (`loadFeatureFlags` in `apps/api/src/wallet/contra
 - **Chain:** `SandboxSolanaChain` is an in-memory mock and the default (`WALLET_CHAIN_MODE=sandbox`; refuses `NODE_ENV=production`). `DevnetSolanaChain` has only been exercised against a fake `Connection` (constructor guards and RPC-failure wrapping), never a real cluster. In a running sandbox API nothing finalizes submitted transfers (only tests call `finalize`).
 - **Network:** devnet only. The USDC devnet mint is a literal in four places (`contracts.ts`, `packages/solana-sdk`, `payments.service.ts`, storefront `lib/wallet/tx.ts`). Mainnet is guarded and unusable (see `providers.md`).
 - **Settlement:** wallet checkout settles through `VerificationService`, triggered only by `ReconciliationService` (interval `WALLET_RECONCILE_INTERVAL_MS`, default 60000, `0` disables; settles rows older than 60 s; single-process timer). It writes no `Payment` or `LedgerEntry` rows. The legacy path is still disabled: `SolanaUsdcProcessor.process` (`apps/api/src/payments/solana-usdc.processor.ts`) and `PaymentsService.recordConfirmedPayment` always throw.
-- **Verification mode:** `PAYMENT_VERIFICATION_MODE=disabled` is in `.env.example` but no code reads it.
+- **Wallet link key:** set `WALLET_LINK_CHALLENGE_KEY` (>= 32 chars); the API refuses to start without it outside development/test. Do not set `ELIGIBILITY_REQUIRED=false` anywhere real (ignored outside development/test).
 - **Privy:** a descriptor only. No SDK, no verification that an address came from Privy.
 - **Sandbox wallet:** browser-held devnet key in `localStorage` (XSS-exposed, lost on storage clear, not for real funds). Not user-owned in the provider-managed sense, and not to be used for any non-custodial claim.
 - **MoonPay:** real mode builds a signed widget URL per the documented parameters but was never called against MoonPay. No webhook handler exists (event names unverified).
 - **Sanctions screening:** none. The default `ComplianceScreen` allows everything.
 - **Prepared message stores:** in-memory (transfers and checkout); lost on restart; not shared across instances.
-- **Refunds:** not implemented; `CryptoTxType.REFUND` is only a schema enum value. There is no treasury key management. Checkout failures that may have moved funds are flagged `manualReview` in audit events and need an operator.
+- **Refunds:** `RefundsModule` is mounted (admin-token only) but no `MERCHANT_SIGNER` implementation ships, so refund submit returns 503 by design. There is no treasury key management. Checkout failures that may have moved funds are flagged `manualReview` in audit events and need an operator.
 - **Delegated payments:** schema model and table only (`DelegatedPermission`).
 - **Fulfillment:** no-op behind `ENABLE_LIVE_FULFILLMENT` (default false).
 - **Admin:** read-only wallet reports exist (`apps/admin/app/wallets/**`, `apps/api/src/wallet-admin/`). The balances report shows no data because nothing writes `BalanceSnapshot`. `apps/admin/app/page.tsx` is still static sample data.
